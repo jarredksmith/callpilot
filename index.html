@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CallPilot">
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<title>CallPilot</title>
+<style>
+:root{
+  --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a; --text:#e7e9ee; --dim:#9aa3b2; --faint:#6b7383;
+  --accent:#5aa9ff; --good:#3ecf8e; --warn:#f5b84b; --bad:#ff6b6b; --violet:#b48cff;
+  --r:14px; --safe-b:env(safe-area-inset-bottom); --safe-t:env(safe-area-inset-top);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif}
+body{display:flex;flex-direction:column;overscroll-behavior:none}
+button,input,select,textarea{font:inherit;color:inherit}
+header{padding:calc(var(--safe-t) + 10px) 16px 10px;display:flex;align-items:center;gap:10px;background:var(--bg);border-bottom:1px solid var(--line)}
+header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.2px}
+.pill{font-size:12px;padding:3px 9px;border-radius:999px;background:var(--panel2);color:var(--dim);white-space:nowrap}
+.pill.live{background:rgba(62,207,142,.15);color:var(--good)}
+.pill.think{background:rgba(90,169,255,.15);color:var(--accent)}
+.pill.pause{background:rgba(245,184,75,.15);color:var(--warn)}
+.pill.err{background:rgba(255,107,107,.15);color:var(--bad)}
+#timer{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--dim);font-size:14px}
+main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 16px 20px}
+nav{display:flex;border-top:1px solid var(--line);background:var(--panel);padding-bottom:var(--safe-b)}
+nav button{flex:1;background:none;border:0;padding:9px 0 8px;color:var(--faint);font-size:11px;display:flex;flex-direction:column;align-items:center;gap:2px}
+nav button svg{width:22px;height:22px}
+nav button.on{color:var(--accent)}
+.view{display:none}.view.on{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
+label{display:block;font-size:13px;color:var(--dim);margin:10px 0 5px}
+label:first-child{margin-top:0}
+input[type=text],input[type=password],input[type=number],select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 12px;outline:none;font-size:16px}
+textarea{min-height:90px;resize:vertical}
+input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--line);background:var(--panel2);border-radius:12px;padding:11px 14px;font-weight:600;font-size:15px;min-height:46px}
+.btn:active{transform:scale(.98)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#06121f}
+.btn.go{background:var(--good);border-color:var(--good);color:#04140d;width:100%;font-size:18px;min-height:56px;margin-top:14px}
+.btn.danger{color:var(--bad)}
+.btn.small{min-height:36px;padding:7px 11px;font-size:13px;border-radius:10px}
+.btn[disabled]{opacity:.45}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.row>.btn{flex:1}
+.hint{font-size:13px;color:var(--faint);margin-top:6px}
+.hint a{color:var(--accent)}
+.controls{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.controls .btn{min-height:52px;font-size:14px;padding:8px}
+.controls .btn.big{grid-column:span 3;background:var(--accent);border-color:var(--accent);color:#06121f;font-size:17px;min-height:58px}
+.chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:10px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:7px 12px;font-size:13px;color:var(--dim)}
+.heard{font-size:13px;color:var(--faint);min-height:20px;margin:2px 0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.note{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:12px;padding:11px 12px;margin-bottom:10px}
+.note.fresh{box-shadow:0 0 0 1px var(--accent) inset}
+.note .meta{font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);display:flex;gap:8px}
+.note .meta span:last-child{margin-left:auto;font-weight:500;letter-spacing:0;color:var(--faint)}
+.note h3{font-size:16px;margin:4px 0 2px;line-height:1.3}
+.note p{margin:4px 0 0;color:var(--dim);font-size:14px}
+.note .say{margin-top:7px;padding:8px 10px;border-radius:9px;background:var(--panel2);font-style:italic;font-size:14px}
+.k-question{border-left-color:var(--accent)} .k-flag{border-left-color:var(--warn)} .k-idea{border-left-color:var(--good)}
+.k-action{border-left-color:var(--violet)} .k-correction{border-left-color:var(--bad)} .k-answer{border-left-color:var(--accent)} .k-system{border-left-color:var(--faint)}
+.empty{color:var(--faint);text-align:center;padding:30px 10px;font-size:14px}
+.tline{font-size:14px;padding:5px 0;border-bottom:1px solid var(--line);color:var(--text)}
+.tline b{color:var(--faint);font-weight:500;font-variant-numeric:tabular-nums;margin-right:6px;font-size:12px}
+.tline.mark{color:var(--warn);font-size:13px}
+.act{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
+.act .who{font-size:12px;color:var(--violet);font-weight:700;min-width:70px}
+.act .due{font-size:12px;color:var(--faint)}
+.lib-item{display:block;width:100%;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:8px}
+.lib-item .t{font-weight:600}
+.lib-item .s{font-size:13px;color:var(--faint);margin-top:2px}
+.md h2{font-size:16px;margin:16px 0 6px;color:var(--accent)} .md h3{font-size:15px;margin:12px 0 4px}
+.md ul{padding-left:20px;margin:6px 0} .md li{margin:3px 0} .md p{margin:6px 0}
+.md table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0;display:block;overflow-x:auto}
+.md td,.md th{border:1px solid var(--line);padding:6px;text-align:left;vertical-align:top}
+.md th{background:var(--panel2)}
+.seg{display:flex;background:var(--panel2);border-radius:10px;padding:3px;margin-bottom:12px}
+.seg button{flex:1;background:none;border:0;padding:8px 0;border-radius:8px;font-size:13px;color:var(--dim)}
+.seg button.on{background:var(--panel);color:var(--text);font-weight:600}
+.sheet{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:flex-end;z-index:20}
+.sheet.on{display:flex}
+.sheet .box{background:var(--panel);width:100%;border-radius:18px 18px 0 0;padding:16px 16px calc(16px + var(--safe-b));max-height:88vh;overflow-y:auto}
+.sheet h2{font-size:17px;margin:0 0 10px}
+#detail{position:fixed;inset:0;background:var(--bg);z-index:15;display:none;flex-direction:column}
+#detail.on{display:flex}
+#detail .top{padding:calc(var(--safe-t) + 8px) 12px 8px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line)}
+#detail .top h2{font-size:16px;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#detail .body{flex:1;overflow-y:auto;padding:14px 16px calc(20px + var(--safe-b))}
+#pocket{position:fixed;inset:0;background:#000;z-index:50;display:none;align-items:flex-end;justify-content:center;padding-bottom:calc(30px + var(--safe-b))}
+#pocket.on{display:flex}
+#pocket div{color:#2a2a2a;font-size:13px;text-align:center}
+#toast{position:fixed;left:16px;right:16px;bottom:calc(76px + var(--safe-b));background:#2b3140;color:var(--text);padding:11px 14px;border-radius:12px;font-size:14px;z-index:60;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none}
+#toast.on{opacity:1;transform:none}
+.banner{background:rgba(245,184,75,.12);border:1px solid rgba(245,184,75,.35);color:var(--warn);border-radius:12px;padding:10px 12px;font-size:14px;margin-bottom:12px}
+.ok{color:var(--good)} .bad{color:var(--bad)}
+details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>CallPilot</h1>
+  <span id="status" class="pill">Ready</span>
+  <span id="timer"></span>
+</header>
+
+<main>
+  <!-- LIVE -->
+  <section id="v-live" class="view on">
+    <div id="installBanner" class="banner" hidden></div>
+    <div id="setup">
+      <div class="card">
+        <label for="topic">What's this meeting?</label>
+        <input id="topic" type="text" placeholder="e.g. Events planning with Kim" autocomplete="off">
+        <label for="callType">Type</label>
+        <select id="callType"></select>
+        <label for="people">Who's there (optional)</label>
+        <input id="people" type="text" placeholder="Kim, Rachel" autocomplete="off">
+        <button id="startBtn" class="btn go">Start listening</button>
+        <div id="readyLine" class="hint"></div>
+      </div>
+      <div id="resumeCard"></div>
+    </div>
+    <div id="live" hidden>
+      <div class="controls">
+        <button id="noteBtn" class="btn big">Note now</button>
+        <button id="askBtn" class="btn">Ask</button>
+        <button id="markBtn" class="btn">★ Mark</button>
+        <button id="pauseBtn" class="btn">Pause</button>
+        <button id="pocketBtn" class="btn">Pocket</button>
+        <button id="endBtn" class="btn danger" style="grid-column:span 2">End &amp; recap</button>
+      </div>
+      <div class="chips" id="quickAsks"></div>
+      <div id="heard" class="heard">Listening…</div>
+      <div id="feed"></div>
+    </div>
+  </section>
+
+  <!-- TRANSCRIPT -->
+  <section id="v-transcript" class="view">
+    <div id="transcript"><div class="empty">The transcript shows up here once a meeting starts.</div></div>
+  </section>
+
+  <!-- ACTIONS -->
+  <section id="v-actions" class="view">
+    <div id="actions"><div class="empty">Action items agreed during the meeting show up here.</div></div>
+  </section>
+
+  <!-- LIBRARY -->
+  <section id="v-library" class="view">
+    <input id="libSearch" type="text" placeholder="Search past meetings" style="margin-bottom:12px">
+    <div id="library"></div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="v-settings" class="view">
+    <div class="card">
+      <strong>Claude</strong>
+      <label for="s-claudeKey">Claude API key</label>
+      <input id="s-claudeKey" type="password" placeholder="sk-ant-…" autocomplete="off">
+      <label for="s-model">Live notes model</label>
+      <select id="s-model">
+        <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (best)</option>
+        <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (faster, cheaper)</option>
+        <option value="claude-opus-5-5">Claude Opus 5.5</option>
+      </select>
+      <label for="s-recapModel">Recap model</label>
+      <select id="s-recapModel">
+        <option value="claude-sonnet-5-5">Claude Sonnet 5.5</option>
+        <option value="claude-opus-5-5">Claude Opus 5.5</option>
+        <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
+      </select>
+      <div class="row" style="margin-top:10px"><button class="btn small" id="testClaude">Test Claude</button></div>
+      <div id="claudeResult" class="hint"></div>
+    </div>
+
+    <div class="card">
+      <strong>Transcription</strong>
+      <label for="s-stt">Speech to text</label>
+      <select id="s-stt">
+        <option value="auto">Automatic: iPhone speech, Whisper if it fails</option>
+        <option value="builtin">iPhone built-in speech only (free)</option>
+        <option value="whisper">OpenAI Whisper only (most reliable)</option>
+      </select>
+      <label for="s-openaiKey">OpenAI API key (for Whisper)</label>
+      <input id="s-openaiKey" type="password" placeholder="sk-…" autocomplete="off">
+      <label for="s-whisperModel">Whisper model</label>
+      <select id="s-whisperModel">
+        <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe (cheapest)</option>
+        <option value="gpt-4o-transcribe">gpt-4o-transcribe (most accurate)</option>
+        <option value="whisper-1">whisper-1</option>
+      </select>
+      <label for="s-vocab">Words it should know (names, acronyms)</label>
+      <input id="s-vocab" type="text" placeholder="ATG, CEMS, LDAR, StackVision, Pardot">
+    </div>
+
+    <div class="card">
+      <strong>Glasses / notifications</strong>
+      <label for="s-gMethod">Send notes as notifications with</label>
+      <select id="s-gMethod">
+        <option value="off">Off (phone screen only)</option>
+        <option value="app">This app (needs Home Screen install)</option>
+        <option value="pushover">Pushover app</option>
+        <option value="ntfy">ntfy app</option>
+      </select>
+      <div id="g-app" class="gopt">
+        <div class="row" style="margin-top:10px"><button class="btn small" id="enableNotif">Allow notifications</button></div>
+        <div id="notifState" class="hint"></div>
+      </div>
+      <div id="g-pushover" class="gopt">
+        <label for="s-poUser">Pushover user key</label>
+        <input id="s-poUser" type="text" autocomplete="off" placeholder="from the Pushover app or pushover.net">
+        <label for="s-poToken">Pushover app token</label>
+        <input id="s-poToken" type="password" autocomplete="off" placeholder="create an app called CallPilot on pushover.net">
+      </div>
+      <div id="g-ntfy" class="gopt">
+        <label for="s-ntfyTopic">ntfy channel name (keep it secret)</label>
+        <div class="row"><input id="s-ntfyTopic" type="text" autocomplete="off" style="flex:1"><button class="btn small" id="ntfyNew" style="flex:none">New</button></div>
+        <div class="hint">Subscribe to this exact name in the ntfy app. Anyone who knows the name can read it.</div>
+      </div>
+      <div id="g-common" class="gopt">
+        <label for="s-gStyle">What to send</label>
+        <select id="s-gStyle">
+          <option value="short">Headline + what to say (best for glasses)</option>
+          <option value="headline">Headline only</option>
+          <option value="full">Everything</option>
+        </select>
+        <label><input type="checkbox" id="s-gSilent" style="width:auto;margin-right:6px">Silent (no phone sound)</label>
+        <label><input type="checkbox" id="s-gAnswers" style="width:auto;margin-right:6px">Also send Ask answers</label>
+        <div class="row" style="margin-top:10px"><button class="btn small" id="testGlasses">Send a test note</button></div>
+        <div id="glassesResult" class="hint"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <strong>About you</strong>
+      <label for="s-name">Your name</label>
+      <input id="s-name" type="text" autocomplete="off">
+      <label for="s-context">Background for Claude (your role, team, priorities, how you want notes)</label>
+      <textarea id="s-context" rows="8"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="btn small" id="importBtn">Import settings file</button>
+        <button class="btn small" id="exportBtn">Export (no keys)</button>
+      </div>
+      <input id="importFile" type="file" accept=".json,application/json" hidden>
+    </div>
+
+    <div class="card">
+      <strong>Timing</strong>
+      <label for="s-interval">Check for new notes every (seconds)</label>
+      <input id="s-interval" type="number" min="15" max="300" step="5">
+      <label for="s-minWords">Only when at least this many new words were said</label>
+      <input id="s-minWords" type="number" min="10" max="300" step="5">
+    </div>
+    <div class="hint" style="text-align:center">Keys and meetings are stored only on this phone.<br><span id="ver"></span></div>
+  </section>
+</main>
+
+<nav id="tabs">
+  <button data-v="live" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>Live</button>
+  <button data-v="transcript"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Transcript</button>
+  <button data-v="actions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/></svg>Actions</button>
+  <button data-v="library"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-2zM8 7h6"/></svg>Library</button>
+  <button data-v="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
+</nav>
+
+<div id="askSheet" class="sheet">
+  <div class="box">
+    <h2>Ask about this meeting</h2>
+    <textarea id="askInput" rows="3" placeholder="e.g. What did Kim say the budget was?"></textarea>
+    <div class="chips" id="askChips" style="margin-top:10px"></div>
+    <div class="row"><button class="btn" id="askCancel">Cancel</button><button class="btn primary" id="askSend">Ask</button></div>
+  </div>
+</div>
+
+<div id="detail">
+  <div class="top">
+    <button class="btn small" id="detailBack">‹ Back</button>
+    <h2 id="detailTitle"></h2>
+    <button class="btn small" id="detailShare">Share</button>
+  </div>
+  <div class="body">
+    <div class="seg" id="detailSeg">
+      <button data-t="recap" class="on">Recap</button><button data-t="notes">Notes</button><button data-t="actions">Actions</button><button data-t="transcript">Transcript</button>
+    </div>
+    <div id="detailBody"></div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn small" id="detailEmail">Email recap</button>
+      <button class="btn small" id="detailCopy">Copy</button>
+      <button class="btn small" id="detailRecap">Write recap</button>
+      <button class="btn small danger" id="detailDelete">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div id="pocket"><div>CallPilot is listening.<br>Double-tap to wake.</div></div>
+<div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
