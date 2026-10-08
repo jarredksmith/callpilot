@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -69,6 +69,7 @@ const LIVE_RULES = `You are CallPilot, a silent copilot for {name} during a live
 The transcript comes from one phone microphone in the room, transcribed automatically. There are no speaker labels: {name}'s words and everyone else's are mixed together. Work out who is speaking from context when it matters, and expect misheard words and names. Lines like "-- Paused --" mark gaps where nothing was recorded.
 
 What good notes look like:
+- A reply: when someone has just asked {name} a direct question, the words he can answer with. This is the most urgent kind of note: put it first.
 - A sharp question {name} should ask next, with exact wording he can say.
 - A flag: a risk, an inconsistency with something said earlier, a commitment with no owner or date, an optics problem, a number that doesn't add up, a decision being made too fast.
 - An idea that connects what's being discussed to his priorities in the background below.
@@ -77,7 +78,7 @@ If the setup says what {name} wants from this meeting, favor notes that serve th
 Do not narrate the meeting back to him, praise, or give generic advice. Do not invent facts or numbers. Prefer silence over a weak note.
 
 Reply with JSON only, no prose, in exactly this shape:
-{"notes": [{"kind": "question|flag|idea|action|correction", "headline": "max 10 words", "detail": "max 35 words, optional", "say": "exact words he could say, max 25 words, optional"}],
+{"notes": [{"kind": "reply|question|flag|idea|action|correction", "headline": "max 10 words", "detail": "max 35 words, optional", "say": "exact words he could say, max 25 words, optional"}],
  "action_items": [{"owner": "name", "item": "what", "due": "date or empty"}]}
 Rules: 0 to 2 notes per update, focused on the most recent minutes. "notes": [] is a good answer when nothing new is worth saying. Never repeat or rephrase a note already shown. Only add action items that were actually agreed in the meeting and are not already captured.`;
 
@@ -96,18 +97,32 @@ Use these sections:
 Be concise and specific. Don't pad sections; write "None" if a section is empty.`;
 
 const QUICK_ASKS = ['What should I ask next?', 'Summarize the last 5 minutes', "What's still unresolved?", 'Who owns what so far?', 'What did they just ask for?', 'Any red flags?'];
-const KIND_LABEL = { question: 'Ask', flag: 'Flag', idea: 'Idea', action: 'To do', correction: 'Correction', answer: 'Answer', system: 'CallPilot' };
-const KINDS = new Set(['question', 'flag', 'idea', 'action', 'correction']);
+const KIND_LABEL = { reply: 'Reply', question: 'Ask', flag: 'Flag', idea: 'Idea', action: 'To do', correction: 'Correction', answer: 'Answer', system: 'CallPilot' };
+const KINDS = new Set(['reply', 'question', 'flag', 'idea', 'action', 'correction']);
 const CHUNK_LINES = 30;
 
 const fill = s => s.replaceAll('{name}', S.name || 'me');
 const glassesOn = () => S.glasses.method !== 'off';
 function liveRules() {
-  if (!(glassesOn() && S.glasses.tight)) return LIVE_RULES;
-  return LIVE_RULES.replace('"headline": "max 10 words"', '"headline": "max 8 words"')
-    .replace('"say": "exact words he could say, max 25 words, optional"', '"say": "exact words he could say, max 15 words, optional"')
-    .replace('"detail": "max 35 words, optional"', '"detail": "max 20 words, optional"')
-    + '\nHe reads notes on smart glasses that show each one for only a few seconds, so keep them very short and plain: no parentheses, no lists.';
+  let rules = LIVE_RULES;
+  if (glassesOn() && S.glasses.tight) {
+    rules = rules.replace('"headline": "max 10 words"', '"headline": "max 8 words"')
+      .replace('"say": "exact words he could say, max 25 words, optional"', '"say": "exact words he could say, max 15 words, optional"')
+      .replace('"detail": "max 35 words, optional"', '"detail": "max 20 words, optional"');
+  }
+  if (glassesOn() && S.glasses.split === 'split' && S.glasses.style !== 'full') {
+    const T = titleMax(), B = glassMax();
+    const what = S.glasses.style === 'say'
+      ? 'For reply and question notes, glance is only the exact words to say (no label, no quote marks). For other kinds, glance is the headline, plus the words to say if there are any.'
+      : S.glasses.style === 'headline'
+        ? 'glance is the headline only, starting with the kind (for example "Flag: ...").'
+        : 'glance starts with the kind (for example "Ask: ..."), then the words to say if there are any.';
+    rules = rules.replace('"say": "exact words he could say,', `"glance_top": "line 1 on his glasses, max ${T} characters", "glance_bottom": "line 2, max ${B} characters, may be empty", "say": "exact words he could say,`)
+      + `\nHe reads notes on smart glasses that show two short lines for a few seconds, so every note also needs glance_top and glance_bottom: the whole note as he will read it, complete on its own, never cut off mid-thought. Count characters: line 1 at most ${T}, line 2 at most ${B}. ${what} No parentheses, no lists.`;
+  } else if (glassesOn() && S.glasses.tight) {
+    rules += '\nHe reads notes on smart glasses that show each one for only a few seconds, so keep them very short and plain: no parentheses, no lists.';
+  }
+  return rules;
 }
 function systemBlocks(rules) {
   let text = fill(rules);
@@ -192,7 +207,8 @@ function parseLive(text) {
     const headline = String(n.headline || '').trim();
     if (!headline) continue;
     const kind = String(n.kind || 'idea').trim().toLowerCase();
-    notes.push({ kind: KINDS.has(kind) ? kind : 'idea', headline, detail: String(n.detail || '').trim(), say: String(n.say || '').trim() });
+    notes.push({ kind: KINDS.has(kind) ? kind : 'idea', headline, detail: String(n.detail || '').trim(), say: String(n.say || '').trim(),
+                 glance: n.glance_top ? { top: String(n.glance_top).trim(), bottom: String(n.glance_bottom || '').trim() } : null });
   }
   const actions = [];
   for (const a of d.action_items || []) {
@@ -200,6 +216,7 @@ function parseLive(text) {
       actions.push({ owner: String(a.owner || '').trim() || 'unassigned', item: String(a.item).trim(), due: String(a.due || '').trim() });
     }
   }
+  notes.sort((a, b) => (b.kind === 'reply') - (a.kind === 'reply'));   // replies go first
   return { notes: notes.slice(0, 2), actions };
 }
 
@@ -224,7 +241,7 @@ function setupText(c) {
 const lineTexts = c => c.lines.map(l => l.mark ? `-- ${l.text} --` : `[${mmss(l.t)}] ${l.text}`);
 const actionsText = acts => acts.map(a => `- ${a.owner}: ${a.item}${a.due ? ` (due ${a.due})` : ''}`).join('\n') || '- none yet';
 
-async function liveNotes(c, forced) {
+async function liveNotes(c, forced, question) {
   const { blocks, tail } = transcriptBlocks(lineTexts(c));
   const shown = c.notes.filter(n => KINDS.has(n.kind)).slice(-40).map(n => `- [${n.kind}] ${n.headline}`).join('\n') || '- none yet';
   const st = setupText(c);
@@ -233,6 +250,7 @@ async function liveNotes(c, forced) {
     + (st ? `Setup:\n${st}\n` : '')
     + `Notes already shown (do not repeat):\n${shown}\nAction items already captured:\n${actionsText(c.actions)}\n\n`
     + (forced ? "He just tapped 'Note now': give him the single most useful note for this moment, even if it's small.\n" : '')
+    + (question ? `The last thing said sounds like a question: "${question}". If it was asked of ${S.name || 'him'} and he hasn't answered it yet, start with a reply note giving him a strong, honest answer he can say (only facts from the meeting and his background; if he can't know it, a good way to say he'll follow up). If it wasn't asked of him, or he already answered, don't make a reply note.\n` : '')
     + 'Return the JSON now.' });
   const text = await claude({ model: S.model, max_tokens: 1500, system: systemBlocks(liveRules()), messages: [{ role: 'user', content: blocks }] });
   return parseLive(text);
@@ -436,7 +454,7 @@ class WhisperSTT {
 
 // ------------------------------------------------------------------ glasses / notifications
 let swReg = null;
-const GLASS_TAG = { question: 'Ask', flag: 'Flag', idea: 'Idea', action: 'To do', correction: 'Fix', answer: 'Answer', system: 'CallPilot' };
+const GLASS_TAG = { reply: 'Reply', question: 'Ask', flag: 'Flag', idea: 'Idea', action: 'To do', correction: 'Fix', answer: 'Answer', system: 'CallPilot' };
 const clip = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s);
 
 function glassesText(n) {
@@ -499,6 +517,15 @@ function glassesParts(n) {
   const style = S.glasses.style;
   if (S.glasses.split !== 'split' || style === 'full') return [{ title, body }];
   const caps = k => (k % 2 === 0 ? titleMax() : glassMax());
+  // Claude's two-line glasses version: one notification, nothing cut, when it fits
+  if (n.glance && n.glance.top) {
+    const top = n.glance.top.replace(/\s+/g, ' ').trim(), bottom = (n.glance.bottom || '').replace(/\s+/g, ' ').trim();
+    if (top.length <= titleMax() && bottom.length <= glassMax()) return [{ title: top, body: bottom }];
+    const lines = layoutLines([`${top} ${bottom}`.trim()], caps).slice(0, 6);
+    const out = [];
+    for (let i = 0; i < lines.length; i += 2) out.push({ title: lines[i], body: lines[i + 1] || '' });
+    return out;
+  }
   const tag = GLASS_TAG[n.kind] || 'Note';
   const sayText = n.say ? n.say.replace(/^["“]|["”]$/g, '') : '';
   let segments;
@@ -575,6 +602,7 @@ function replayLast() {
 let C = null;               // the current meeting
 let stt = null;             // the speech engine in use
 let engineName = '';
+let pendingQuestion = null, lastQuestionLine = -1;
 let insightBusy = false, pendingForce = false, lastInsight = 0, wordsAtLast = 0, hiddenAt = 0;
 let wake = null, autosaveTimer = null, tickTimer = null, lastSpeechAt = 0;
 
@@ -684,6 +712,13 @@ function tick() {
   if (C.paused || insightBusy) return;
   const newWords = totalWords() - wordsAtLast;
   const since = Date.now() - lastInsight;
+  // someone may have just asked him something: don't wait for the normal timing
+  const q = recentQuestion();
+  if (q && since >= 3000 && Date.now() - lastSpeechAt >= 1200 && !(stt && stt.inFlight && stt.inFlight())) {
+    lastQuestionLine = q.idx;
+    runNotes(false, q.text);
+    return;
+  }
   if (S.mode === 'timer') {
     if (since >= S.interval * 1000 && newWords >= S.minWords) runNotes(false);
     return;
@@ -702,15 +737,34 @@ function tick() {
   if (quiet && settled) runNotes(false);
 }
 
-async function runNotes(forced) {
+// The newest transcript line, if it reads like a question that hasn't been checked yet.
+function questionRE() {
+  const first = (S.name || '').split(/\s+/)[0].toLowerCase().replace(/[^a-z'-]/g, '');
+  const lead = String.raw`(^|[.!?]\s+)((so|and|but|ok|okay|well|hey|um|uh|alright|now|then|also` + (first ? '|' + first : '') + String.raw`)[,]?\s+)*`;
+  return new RegExp(String.raw`\?\s*$|` + lead + String.raw`(what|how|why|when|where|who|which)\b[^.!]*$|` + lead
+    + String.raw`(can|could|would|will|do|does|did|are|is|have|has|should)\s+(you|your|y'all|ya|we)\b[^.!]*$`, 'i');
+}
+function recentQuestion() {
+  if (!C) return null;
+  for (let i = C.lines.length - 1; i >= 0 && i > lastQuestionLine; i--) {
+    const l = C.lines[i];
+    if (l.mark) continue;
+    const tail = l.text.split(/(?<=[.!?])\s+/).slice(-2).join(' ').trim();
+    if (words(tail) >= 4 && questionRE().test(tail)) return { idx: i, text: tail.slice(-220) };
+    return null;   // only the newest spoken line counts
+  }
+  return null;
+}
+
+async function runNotes(forced, question) {
   if (!C) return;
-  if (insightBusy) { if (forced) pendingForce = true; return; }
+  if (insightBusy) { if (forced) pendingForce = true; else if (question) pendingQuestion = question; return; }
   if (!C.lines.some(l => !l.mark)) { if (forced) toast('Nothing heard yet.'); return; }
   insightBusy = true; baseStatus();
   lastInsight = Date.now(); wordsAtLast = totalWords();
   const meeting = C;
   try {
-    const { notes, actions } = await liveNotes(meeting, forced);
+    const { notes, actions } = await liveNotes(meeting, forced, question);
     if (meeting !== C) return;
     for (const n of notes) addNote(n);
     for (const a of actions) {
@@ -725,6 +779,7 @@ async function runNotes(forced) {
   } finally {
     insightBusy = false; baseStatus();
     if (pendingForce) { pendingForce = false; runNotes(true); }
+    else if (pendingQuestion) { const q = pendingQuestion; pendingQuestion = null; runNotes(false, q); }
   }
 }
 
@@ -1065,9 +1120,33 @@ function init() {
   $('#pauseBtn').onclick = togglePause;
   $('#pocketBtn').onclick = openPocket;
   $('#endBtn').onclick = () => { if (confirmEnd()) endMeeting(); };
-  // pocket screen: one tap replays the last note on the glasses, two quick taps wake the screen
-  let tapTimer = null;
-  $('#pocket').addEventListener('click', () => {
+  // pocket screen gestures (no need to look): tap = replay the last note, double-tap = wake,
+  // press and hold = note now, two-finger tap = "what should I ask next?"
+  const pocket = $('#pocket');
+  let tapTimer = null, pressStart = 0, maxTouches = 0, holdTimer = null, held = false;
+  const pocketHint = text => { const el = $('#pocketMsg'); el.textContent = text; clearTimeout(pocketHint.h); pocketHint.h = setTimeout(() => { el.textContent = ''; }, 1500); };
+  let gesture = false;
+  pocket.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (!gesture) {                          // first finger down: a new gesture starts
+      gesture = true; held = false; maxTouches = 0; pressStart = Date.now();
+      clearTimeout(holdTimer);
+      holdTimer = setTimeout(() => { if (maxTouches === 1) { held = true; pocketHint('Note requested'); runNotes(true); } }, 650);
+    }
+    maxTouches = Math.max(maxTouches, e.touches.length);
+  }, { passive: false });
+  pocket.addEventListener('touchend', e => {
+    e.preventDefault();
+    if (e.touches.length) return;            // wait until every finger is up
+    gesture = false;
+    clearTimeout(holdTimer);
+    const fingers = maxTouches; maxTouches = 0;
+    if (held) return;
+    if (fingers >= 2) { pocketHint('Asking what to ask next'); ask('What should I ask next?'); return; }
+    if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; closePocket(); return; }
+    tapTimer = setTimeout(() => { tapTimer = null; pocketHint('Replaying'); replayLast(); }, 380);
+  }, { passive: false });
+  pocket.addEventListener('click', () => {      // mouse fallback (desktop browsers)
     if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; closePocket(); return; }
     tapTimer = setTimeout(() => { tapTimer = null; replayLast(); }, 380);
   });
@@ -1143,6 +1222,6 @@ function init() {
 function confirmEnd() { return window.confirm('End the meeting and write the recap?'); }
 
 // a small hook for automated tests (inject transcript lines without a microphone)
-window.__cp = { tickNow: () => tick(), chunkText, addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
+window.__cp = { recentQuestion, tickNow: () => tick(), chunkText, addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
 
 init();
