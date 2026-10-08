@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -15,7 +15,7 @@ const standalone = () => window.matchMedia('(display-mode: standalone)').matches
 const DEFAULTS = {
   name: '', context: '', claudeKey: '', model: 'claude-sonnet-5-5', recapModel: 'claude-sonnet-5-5',
   stt: 'auto', openaiKey: '', whisperModel: 'gpt-4o-mini-transcribe', vocab: '',
-  interval: 40, minWords: 35,
+  interval: 40, minWords: 35, mode: 'pause', pauseWords: 45, backstop: 30,
   glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'say', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true, maxChars: 45, titleMax: 70 },
 };
 const store = {
@@ -277,7 +277,7 @@ class BuiltinSTT {
     this.res = [];   // per result index: { text, done (text already taken), final, changedAt, startT }
     r.lang = 'en-US'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
     r.onresult = e => {
-      this.activity = Date.now(); this.fails = 0;
+      this.activity = Date.now(); this.fails = 0; this.h.onVoice();
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const txt = ((e.results[i][0] && e.results[i][0].transcript) || '').trim();
         const slot = this.res[i] || (this.res[i] = { text: '', done: '', final: false, changedAt: Date.now(), startT: this.h.now() });
@@ -314,6 +314,9 @@ class BuiltinSTT {
     this.h.onText(add, slot.startT);
     slot.startT = this.h.now();
   }
+  inFlight() { return !!(this.res && this.res.some(sl => sl && sl.text !== sl.done)); }
+  // take words still being spoken (for long stretches with no pause)
+  flushPending() { if (this.res) { for (const sl of this.res) if (sl && !sl.final && sl.text !== sl.done) this.take(sl); this.showInterim(); } }
   showInterim() {
     const pending = this.res.filter(sl => sl && !sl.final && sl.text !== sl.done).map(sl => sl.text.slice(sl.done.length).trim()).join(' ');
     this.h.onInterim(pending);
@@ -338,7 +341,8 @@ class BuiltinSTT {
 }
 
 class WhisperSTT {
-  constructor(h) { this.h = h; this.running = false; this.queue = Promise.resolve(); this.seq = 0; }
+  constructor(h) { this.h = h; this.running = false; this.queue = Promise.resolve(); this.seq = 0; this.pending = 0; }
+  inFlight() { return this.pending > 0 || !!(this.seg && this.seg.voiced >= 400); }
   async start() {
     if (!S.openaiKey.trim()) throw new Error('Whisper needs an OpenAI API key in Settings.');
     this.running = true;
@@ -372,11 +376,12 @@ class WhisperSTT {
     const voice = rms > Math.max(0.006, this.noise * 3);
     if (!voice) this.noise = this.noise * 0.98 + rms * 0.02;
     const seg = this.seg, now = Date.now(), dur = now - seg.began;
-    if (voice) { seg.voiced += 100; seg.silentSince = 0; if (!this.hearing) { this.hearing = true; this.h.onInterim('speech…'); } }
+    if (voice) { seg.voiced += 100; seg.silentSince = 0; this.h.onVoice(); if (!this.hearing) { this.hearing = true; this.h.onInterim('speech…'); } }
     else if (this.hearing && seg.silentSince && now - seg.silentSince > 1500) { this.hearing = false; this.h.onInterim(''); }
     else if (!seg.silentSince) seg.silentSince = now;
     const quietFor = seg.silentSince ? now - seg.silentSince : 0;
-    if ((dur > 7000 && quietFor > 700) || dur > 25000) this.cut();
+    // cut at the end of a point so it gets transcribed right away (short chunks too, after a real pause)
+    if ((dur > 7000 && quietFor > 700) || (dur > 2000 && quietFor > 1200 && seg.voiced >= 400) || dur > 25000) this.cut();
   }
   cut() {
     const old = this.seg; this.seg = null;
@@ -387,7 +392,8 @@ class WhisperSTT {
     if (seg.voiced < 400 || !seg.chunks.length) return;   // nothing worth sending
     const blob = new Blob(seg.chunks, { type: seg.chunks[0].type || this.mime || 'audio/mp4' });
     const my = ++this.seq;
-    this.queue = this.queue.then(() => this.send(blob, seg.start, my)).catch(() => {});
+    this.pending++;
+    this.queue = this.queue.then(() => this.send(blob, seg.start, my)).catch(() => {}).finally(() => { this.pending--; });
   }
   async send(blob, start) {
     const ext = /mp4|m4a|aac/.test(blob.type) ? 'm4a' : /ogg/.test(blob.type) ? 'ogg' : 'webm';
@@ -570,7 +576,7 @@ let C = null;               // the current meeting
 let stt = null;             // the speech engine in use
 let engineName = '';
 let insightBusy = false, pendingForce = false, lastInsight = 0, wordsAtLast = 0, hiddenAt = 0;
-let wake = null, autosaveTimer = null, tickTimer = null;
+let wake = null, autosaveTimer = null, tickTimer = null, lastSpeechAt = 0;
 
 const nowSec = () => (C ? Math.max(0, (Date.now() - C.started) / 1000) : 0);
 const elapsed = nowSec;
@@ -600,6 +606,7 @@ function addMark(text) { if (C) { C.lines.push({ t: nowSec(), text, mark: true }
 const sttHooks = {
   now: () => nowSec(),
   onText: (txt, t) => addLine(txt, t),
+  onVoice: () => { lastSpeechAt = Date.now(); },
   onInterim: txt => { $('#heard').textContent = txt ? `Hearing: ${txt}` : (C && C.paused ? 'Paused' : 'Listening…'); },
   onError: msg => toast(msg),
   onFatal: msg => fallbackToWhisper(msg),
@@ -665,7 +672,7 @@ async function startMeeting() {
   renderTranscript(); renderActions();
   keepAwake(true);
   baseStatus();
-  tickTimer = setInterval(tick, 1000);
+  tickTimer = setInterval(tick, 250);
   autosaveTimer = setInterval(() => C && DB.put(C).catch(() => {}), 20000);
   DB.put(C).catch(() => {});
   if (!('wakeLock' in navigator)) pushSystem('This phone may lock the screen during the meeting, which stops listening. Set Auto-Lock to Never while you use CallPilot.');
@@ -676,7 +683,23 @@ function tick() {
   $('#timer').textContent = mmss(nowSec());
   if (C.paused || insightBusy) return;
   const newWords = totalWords() - wordsAtLast;
-  if (Date.now() - lastInsight >= S.interval * 1000 && newWords >= S.minWords) runNotes(false);
+  const since = Date.now() - lastInsight;
+  if (S.mode === 'timer') {
+    if (since >= S.interval * 1000 && newWords >= S.minWords) runNotes(false);
+    return;
+  }
+  // check right after someone finishes a point, once enough has been said since the last note
+  if (since < 8000) return;
+  if (since >= S.backstop * 1000) {
+    // nobody has paused for a while: take what's been said so far and check anyway
+    if (stt && stt.flushPending) stt.flushPending();
+    if (totalWords() - wordsAtLast >= S.pauseWords) runNotes(false);
+    return;
+  }
+  if (newWords < S.pauseWords) return;
+  const quiet = Date.now() - lastSpeechAt >= 1500;
+  const settled = !(stt && stt.inFlight && stt.inFlight());
+  if (quiet && settled) runNotes(false);
 }
 
 async function runNotes(forced) {
@@ -927,6 +950,7 @@ function refreshNotifState() {
   if (!('Notification' in window)) el.innerHTML = isIOS && !standalone() ? 'On iPhone, add CallPilot to your Home Screen (Share > Add to Home Screen) and open it from there to allow notifications.' : 'This browser does not support notifications.';
   else el.textContent = { granted: 'Notifications are allowed.', denied: 'Notifications are blocked. Turn them on in iPhone Settings > Notifications > CallPilot.', default: 'Not allowed yet.' }[Notification.permission];
 }
+function showTimingOpts() { $('#t-pause').hidden = S.mode === 'timer'; $('#t-timer').hidden = S.mode !== 'timer'; }
 function showGlassOpts() {
   const m = S.glasses.method;
   $('#g-app').hidden = m !== 'app'; $('#g-pushover').hidden = m !== 'pushover'; $('#g-ntfy').hidden = m !== 'ntfy'; $('#g-common').hidden = m === 'off';
@@ -943,7 +967,7 @@ function readyLine() {
   else ib.hidden = true;
 }
 
-const SET_MAP = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords' };
+const SET_MAP = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords', mode: 's-mode', pauseWords: 's-pauseWords', backstop: 's-backstop' };
 const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat', maxChars: 's-gMax', titleMax: 's-gTitleMax' };
 function fillSettings() {
   for (const [k, id] of Object.entries(SET_MAP)) $('#' + id).value = S[k];
@@ -952,10 +976,10 @@ function fillSettings() {
   showGlassOpts();
 }
 function bindSettings() {
-  const map = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords' };
+  const map = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords', mode: 's-mode', pauseWords: 's-pauseWords', backstop: 's-backstop' };
   for (const [k, id] of Object.entries(map)) {
     const el = $('#' + id); el.value = S[k];
-    el.addEventListener('change', () => { S[k] = el.type === 'number' ? Math.max(Number(el.min) || 0, Number(el.value) || DEFAULTS[k]) : el.value; saveSettings(); readyLine(); });
+    el.addEventListener('change', () => { S[k] = el.type === 'number' ? Math.max(Number(el.min) || 0, Number(el.value) || DEFAULTS[k]) : el.value; saveSettings(); readyLine(); showTimingOpts(); });
   }
   for (const [k, id] of Object.entries(GLASS_MAP)) {
     const el = $('#' + id); el.value = S.glasses[k];
@@ -965,7 +989,7 @@ function bindSettings() {
     const el = $('#' + id); el.checked = !!S.glasses[k];
     el.addEventListener('change', () => { S.glasses[k] = el.checked; saveSettings(); });
   }
-  showGlassOpts();
+  showGlassOpts(); showTimingOpts();
   $('#ver').textContent = `CallPilot Mobile ${VERSION}`;
 }
 
@@ -977,14 +1001,14 @@ function newTopicName() {
 async function importSettings(file) {
   try {
     const d = JSON.parse(await file.text());
-    for (const k of ['name', 'context', 'vocab', 'model', 'recapModel', 'stt', 'whisperModel', 'interval', 'minWords']) if (d[k] !== undefined) S[k] = d[k];
+    for (const k of ['name', 'context', 'vocab', 'model', 'recapModel', 'stt', 'whisperModel', 'interval', 'minWords', 'mode', 'pauseWords', 'backstop']) if (d[k] !== undefined) S[k] = d[k];
     if (d.glasses && typeof d.glasses === 'object') for (const k of ['method', 'style', 'silent', 'answers', 'split', 'gap', 'repeat', 'tight', 'maxChars', 'titleMax']) if (d.glasses[k] !== undefined) S.glasses[k] = d.glasses[k];
     saveSettings(); fillSettings(); readyLine();
     toast('Settings imported. Add your API keys if you haven’t yet.');
   } catch (e) { toast(`That file couldn't be read: ${e.message}`); }
 }
 async function exportSettings() {
-  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers, split: S.glasses.split, gap: S.glasses.gap, repeat: S.glasses.repeat, tight: S.glasses.tight, maxChars: S.glasses.maxChars, titleMax: S.glasses.titleMax } };
+  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, mode: S.mode, pauseWords: S.pauseWords, backstop: S.backstop, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers, split: S.glasses.split, gap: S.glasses.gap, repeat: S.glasses.repeat, tight: S.glasses.tight, maxChars: S.glasses.maxChars, titleMax: S.glasses.titleMax } };
   const file = new File([JSON.stringify(out, null, 2)], 'CallPilot Mobile settings.json', { type: 'application/json' });
   try {
     if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] });
@@ -1119,6 +1143,6 @@ function init() {
 function confirmEnd() { return window.confirm('End the meeting and write the recap?'); }
 
 // a small hook for automated tests (inject transcript lines without a microphone)
-window.__cp = { chunkText, addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
+window.__cp = { tickNow: () => tick(), chunkText, addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
 
 init();

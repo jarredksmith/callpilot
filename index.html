@@ -287,10 +287,23 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
 
     <div class="card">
       <strong>Timing</strong>
-      <label for="s-interval">Check for new notes every (seconds)</label>
-      <input id="s-interval" type="number" min="15" max="300" step="5">
-      <label for="s-minWords">Only when at least this many new words were said</label>
-      <input id="s-minWords" type="number" min="10" max="300" step="5">
+      <label for="s-mode">When to check for a new note</label>
+      <select id="s-mode">
+        <option value="pause">When someone finishes a point (recommended)</option>
+        <option value="timer">On a fixed timer</option>
+      </select>
+      <div id="t-pause">
+        <label for="s-pauseWords">New words needed before a pause triggers a note</label>
+        <input id="s-pauseWords" type="number" min="10" max="300" step="5">
+        <label for="s-backstop">Check anyway after this many seconds if nobody pauses</label>
+        <input id="s-backstop" type="number" min="15" max="300" step="5">
+      </div>
+      <div id="t-timer">
+        <label for="s-interval">Check for new notes every (seconds)</label>
+        <input id="s-interval" type="number" min="15" max="300" step="5">
+        <label for="s-minWords">Only when at least this many new words were said</label>
+        <input id="s-minWords" type="number" min="10" max="300" step="5">
+      </div>
     </div>
     <div class="hint" style="text-align:center">Keys and meetings are stored only on this phone.<br><span id="ver"></span></div>
   </section>
