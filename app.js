@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.3.1';
+const VERSION = '1.4.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -73,6 +73,7 @@ What good notes look like:
 - A flag: a risk, an inconsistency with something said earlier, a commitment with no owner or date, an optics problem, a number that doesn't add up, a decision being made too fast.
 - An idea that connects what's being discussed to his priorities in the background below.
 - A correction if an earlier note misread the situation.
+If the setup says what {name} wants from this meeting, favor notes that serve that goal, and flag when the meeting drifts away from it or when it gets answered.
 Do not narrate the meeting back to him, praise, or give generic advice. Do not invent facts or numbers. Prefer silence over a weak note.
 
 Reply with JSON only, no prose, in exactly this shape:
@@ -82,7 +83,7 @@ Rules: 0 to 2 notes per update, focused on the most recent minutes. "notes": [] 
 
 const ASK_RULES = `You are CallPilot, {name}'s private copilot during a live, in-person meeting. He tapped a quick question. He will read your answer on smart glasses that show a few words at a time for only a few seconds, so answer in at most 25 words, in short sentences, plain text, no headings, no lists unless asked. If useful, give exact wording he can say. Use the transcript (one room microphone, no speaker labels) and the background; say so if they don't cover it.`;
 
-const RECAP_RULES = `You are CallPilot. The meeting has ended. Write {name}'s private recap in Markdown from the transcript (auto-transcribed from one phone microphone in the room, so there are no speaker labels and names or words may be misheard; fix obvious errors and don't guess at what you can't tell). If the setup lists who was there, use those names for owners where the transcript makes it clear. Moments {name} bookmarked mattered to him: make sure each one is covered.
+const RECAP_RULES = `You are CallPilot. The meeting has ended. Write {name}'s private recap in Markdown from the transcript (auto-transcribed from one phone microphone in the room, so there are no speaker labels and names or words may be misheard; fix obvious errors and don't guess at what you can't tell). If the setup lists who was there, use those names for owners where the transcript makes it clear. Moments {name} bookmarked mattered to him: make sure each one is covered. If the setup says what he wanted from the meeting, add a section right after the Summary called "## What you wanted from this meeting" that answers it directly from the meeting (or says plainly that it didn't get there).
 
 Use these sections:
 ## Summary (3 to 6 bullets)
@@ -216,6 +217,7 @@ function transcriptBlocks(lines, maxChars = 120000) {
 function setupText(c) {
   const parts = [];
   if (c.callType && CALL_TYPES[c.callType]) parts.push(`Meeting type: ${c.callType}. ` + fill(CALL_TYPES[c.callType]));
+  if (c.focus) parts.push(`What ${S.name || 'he'} wants from this meeting (prioritize notes that help with this):\n${c.focus}`);
   if (c.people && c.people.length) parts.push(`There besides ${S.name || "me"}: ${c.people.join(', ')}`);
   return parts.join('\n');
 }
@@ -646,7 +648,7 @@ async function keepAwake(on) {
 async function startMeeting() {
   if (!S.claudeKey.trim()) { toast('Add your Claude API key in Settings first.'); showView('settings'); return; }
   const people = $('#people').value.split(',').map(s => s.trim()).filter(Boolean);
-  C = { id: 'c' + Date.now(), topic: $('#topic').value.trim(), callType: $('#callType').value, people, started: Date.now(), ended: null,
+  C = { id: 'c' + Date.now(), topic: $('#topic').value.trim(), callType: $('#callType').value, people, focus: $('#focus').value.trim(), started: Date.now(), ended: null,
         lines: [], notes: [], actions: [], bookmarks: [], recap: '', status: 'live', paused: false, engine: '' };
   insightBusy = false; pendingForce = false; lastInsight = Date.now(); wordsAtLast = 0;
   try {
@@ -659,6 +661,7 @@ async function startMeeting() {
   C.engine = engineName;
   store.set('cp.lastSetup', { topic: C.topic, callType: C.callType, people: $('#people').value });
   $('#setup').hidden = true; $('#live').hidden = false; $('#feed').innerHTML = '';
+  renderFocus();
   renderTranscript(); renderActions();
   keepAwake(true);
   baseStatus();
@@ -726,6 +729,20 @@ function renderNote(n, fresh) {
   feed.prepend(el);
 }
 
+function renderFocus() {
+  const el = $('#focusLine');
+  el.textContent = C && C.focus ? `Focus: ${C.focus}  (tap to change)` : 'Add a focus for this meeting (tap)';
+}
+function editFocus() {
+  if (!C) return;
+  const v = window.prompt('What do you want help with in this meeting?', C.focus || '');
+  if (v === null) return;
+  C.focus = v.trim();
+  addMark(C.focus ? `Focus changed: ${C.focus}` : 'Focus cleared');
+  renderFocus();
+  toast('Focus updated for the rest of the meeting.');
+}
+
 function togglePause() {
   if (!C) return;
   if (!C.paused && !C.pausing) {
@@ -772,6 +789,7 @@ async function endMeeting() {
   keepAwake(false); closePocket();
   C = null;
   $('#live').hidden = true; $('#setup').hidden = false; $('#timer').textContent = '';
+  $('#topic').value = ''; $('#people').value = ''; $('#focus').value = '';   // fresh setup for the next meeting
   await DB.put(meeting).catch(() => {});
   setStatus('Writing recap', 'think');
   await makeRecap(meeting);
@@ -858,7 +876,7 @@ async function openDetail(id) {
   renderDetail(c);
 }
 function detailText(c, tab) {
-  if (tab === 'recap') return c.recap || '';
+  if (tab === 'recap') return (c.focus ? `What I wanted from this meeting: ${c.focus}\n\n` : '') + (c.recap || '');
   if (tab === 'notes') return c.notes.filter(n => n.kind !== 'system').map(n => `[${n.stamp}] ${KIND_LABEL[n.kind] || n.kind}: ${n.headline}${n.detail ? '\n' + n.detail : ''}${n.say ? `\n"${n.say}"` : ''}`).join('\n\n');
   if (tab === 'actions') return c.actions.map(a => `- ${a.owner}: ${a.item}${a.due ? ` (due ${a.due})` : ''}`).join('\n');
   return lineTexts(c).join('\n');
@@ -866,7 +884,8 @@ function detailText(c, tab) {
 function renderDetail(c) {
   $$('#detailSeg button').forEach(b => b.classList.toggle('on', b.dataset.t === detailTab));
   const body = $('#detailBody');
-  if (detailTab === 'recap') body.innerHTML = c.recap ? `<div class="md">${md(c.recap)}</div>` : '<div class="empty">No recap yet. Tap Write recap.</div>';
+  const focusHTML = c.focus ? `<div class="hint" style="margin-bottom:8px"><b>You wanted:</b> ${esc(c.focus)}</div>` : '';
+  if (detailTab === 'recap') body.innerHTML = focusHTML + (c.recap ? `<div class="md">${md(c.recap)}</div>` : '<div class="empty">No recap yet. Tap Write recap.</div>');
   else if (detailTab === 'notes') body.innerHTML = c.notes.length ? c.notes.slice().reverse().map(n => `<div class="note k-${n.kind}"><div class="meta"><span>${esc(KIND_LABEL[n.kind] || n.kind)}</span><span>${esc(n.stamp)}</span></div><h3>${esc(n.headline)}</h3>${n.detail ? `<p>${esc(n.detail)}</p>` : ''}${n.say ? `<div class="say">“${esc(n.say)}”</div>` : ''}</div>`).join('') : '<div class="empty">No notes.</div>';
   else if (detailTab === 'actions') body.innerHTML = actionsHTML(c.actions);
   else body.innerHTML = c.lines.length ? c.lines.map(l => l.mark ? `<div class="tline mark">— ${esc(l.text)} —</div>` : `<div class="tline"><b>${mmss(l.t)}</b>${esc(l.text)}</div>`).join('') : '<div class="empty">Nothing was transcribed.</div>';
@@ -1018,6 +1037,7 @@ function init() {
   $('#quickAsks').addEventListener('click', e => { if (e.target.classList.contains('chip')) ask(e.target.textContent); });
   $('#askChips').addEventListener('click', e => { if (e.target.classList.contains('chip')) ask(e.target.textContent); });
   $('#markBtn').onclick = bookmark;
+  $('#focusLine').onclick = editFocus;
   $('#pauseBtn').onclick = togglePause;
   $('#pocketBtn').onclick = openPocket;
   $('#endBtn').onclick = () => { if (confirmEnd()) endMeeting(); };

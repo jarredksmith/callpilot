@@ -129,6 +129,8 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <select id="callType"></select>
         <label for="people">Who's there (optional)</label>
         <input id="people" type="text" placeholder="Kim, Rachel" autocomplete="off">
+        <label for="focus">What do you want help with? (optional)</label>
+        <textarea id="focus" rows="2" style="min-height:64px" placeholder="e.g. Get Kim's sign-off on the show list; flag any budget cuts."></textarea>
         <button id="startBtn" class="btn go">Start listening</button>
         <div id="readyLine" class="hint"></div>
       </div>
@@ -144,6 +146,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <button id="replayBtn" class="btn">Replay</button>
         <button id="endBtn" class="btn danger">End</button>
       </div>
+      <div id="focusLine" class="hint" style="margin:-2px 0 10px;cursor:pointer"></div>
       <div class="chips" id="quickAsks"></div>
       <div id="heard" class="heard">Listening…</div>
       <div id="feed"></div>
