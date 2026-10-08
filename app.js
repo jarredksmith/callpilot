@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -925,7 +925,21 @@ async function checkInterrupted() {
   }
 }
 
+// Fit the full screen on iPhone Home Screen apps, where the reported height can come up short.
+function fitScreen() {
+  let h = window.innerHeight;
+  if (standalone() && isIOS) {
+    const portrait = window.matchMedia('(orientation: portrait)').matches;
+    const full = portrait ? Math.max(screen.height, screen.width) : Math.min(screen.height, screen.width);
+    if (full > h) h = full;
+  }
+  document.documentElement.style.setProperty('--app-h', h + 'px');
+}
+
 function init() {
+  fitScreen();
+  window.addEventListener('resize', fitScreen);
+  window.addEventListener('orientationchange', () => setTimeout(fitScreen, 300));
   // call types and the last setup
   $('#callType').innerHTML = Object.keys(CALL_TYPES).map(k => `<option>${esc(k)}</option>`).join('');
   const last = store.get('cp.lastSetup', null);
