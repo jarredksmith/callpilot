@@ -7,7 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CallPilot">
-<meta name="theme-color" content="#0f1115">
+<meta name="theme-color" content="#171a21">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon-192.png">
@@ -19,8 +19,7 @@
   --r:14px; --safe-b:env(safe-area-inset-bottom); --safe-t:env(safe-area-inset-top);
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif}
-html{background:var(--panel)}
+html,body{margin:0;height:100%;background:var(--panel);color:var(--text);font:16px/1.4 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif}
 /* iPhone Home Screen apps can report a viewport shorter than the screen, leaving a band at the bottom.
    The app is pinned to the full screen height instead (--app-h is set from the screen size). */
 body{display:flex;flex-direction:column;overscroll-behavior:none;position:fixed;top:0;left:0;right:0;height:var(--app-h,100%);overflow:hidden}
@@ -33,8 +32,10 @@ header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.2px}
 .pill.pause{background:rgba(245,184,75,.15);color:var(--warn)}
 .pill.err{background:rgba(255,107,107,.15);color:var(--bad)}
 #timer{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--dim);font-size:14px}
-main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 16px 20px}
+main{flex:1;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 16px 20px}
 nav{display:flex;border-top:1px solid var(--line);background:var(--panel);padding-bottom:var(--safe-b)}
+html.ios-band nav{padding-bottom:4px}
+html.ios-band #toast{bottom:76px}
 nav button{flex:1;background:none;border:0;padding:9px 0 8px;color:var(--faint);font-size:11px;display:flex;flex-direction:column;align-items:center;gap:2px}
 nav button svg{width:22px;height:22px}
 nav button.on{color:var(--accent)}
@@ -240,10 +241,12 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         </select>
         <label for="s-gSplit">Reading time on the glasses</label>
         <select id="s-gSplit">
-          <option value="split">Split: headline first, then what to say (recommended)</option>
+          <option value="split">Split into short pieces that fit the glasses (recommended)</option>
           <option value="one">One notification per note</option>
         </select>
-        <label for="s-gGap">Time between the two parts</label>
+        <label for="s-gMax">Characters per notification (what the glasses show without cutting off)</label>
+        <input id="s-gMax" type="number" min="20" max="200" step="1">
+        <label for="s-gGap">Time between parts</label>
         <select id="s-gGap">
           <option value="3">3 seconds</option>
           <option value="5">5 seconds</option>
@@ -258,7 +261,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <label><input type="checkbox" id="s-gTight" style="width:auto;margin-right:6px">Extra-short wording (8-word headline, 15-word "say")</label>
         <label><input type="checkbox" id="s-gSilent" style="width:auto;margin-right:6px">Silent (no phone sound)</label>
         <label><input type="checkbox" id="s-gAnswers" style="width:auto;margin-right:6px">Also send Ask answers</label>
-        <div class="row" style="margin-top:10px"><button class="btn small" id="testGlasses">Send a test note</button></div>
+        <div class="row" style="margin-top:10px"><button class="btn small" id="testGlasses">Send a test note</button><button class="btn small" id="measureGlasses">Measure glasses width</button></div>
         <div id="glassesResult" class="hint"></div>
       </div>
     </div>

@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.1.1';
+const VERSION = '1.2.1';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -16,7 +16,7 @@ const DEFAULTS = {
   name: '', context: '', claudeKey: '', model: 'claude-sonnet-5-5', recapModel: 'claude-sonnet-5-5',
   stt: 'auto', openaiKey: '', whisperModel: 'gpt-4o-mini-transcribe', vocab: '',
   interval: 40, minWords: 35,
-  glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'short', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true },
+  glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'short', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true, maxChars: 45 },
 };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
@@ -80,7 +80,7 @@ Reply with JSON only, no prose, in exactly this shape:
  "action_items": [{"owner": "name", "item": "what", "due": "date or empty"}]}
 Rules: 0 to 2 notes per update, focused on the most recent minutes. "notes": [] is a good answer when nothing new is worth saying. Never repeat or rephrase a note already shown. Only add action items that were actually agreed in the meeting and are not already captured.`;
 
-const ASK_RULES = `You are CallPilot, {name}'s private copilot during a live, in-person meeting. He tapped a quick question. He will read your answer on smart glasses that show text for only a few seconds, so answer in at most 30 words, plain text, no headings, no lists unless asked. If useful, give exact wording he can say. Use the transcript (one room microphone, no speaker labels) and the background; say so if they don't cover it.`;
+const ASK_RULES = `You are CallPilot, {name}'s private copilot during a live, in-person meeting. He tapped a quick question. He will read your answer on smart glasses that show a few words at a time for only a few seconds, so answer in at most 25 words, in short sentences, plain text, no headings, no lists unless asked. If useful, give exact wording he can say. Use the transcript (one room microphone, no speaker labels) and the background; say so if they don't cover it.`;
 
 const RECAP_RULES = `You are CallPilot. The meeting has ended. Write {name}'s private recap in Markdown from the transcript (auto-transcribed from one phone microphone in the room, so there are no speaker labels and names or words may be misheard; fix obvious errors and don't guess at what you can't tell). If the setup lists who was there, use those names for owners where the transcript makes it clear. Moments {name} bookmarked mattered to him: make sure each one is covered.
 
@@ -428,21 +428,74 @@ function glassesText(n) {
   return { title, body: clip(body, style === 'full' ? 900 : 200) };
 }
 
-// One note becomes one or two notifications. Splitting gives each part its own few seconds on the glasses.
+// Break text into pieces short enough for the glasses to show whole (they cut off long notifications).
+// Splits at sentence ends first, then at commas and similar, then between words. Never adds "…".
+function wrapWords(sentence, max) {
+  // fewest lines first, then the most even line lengths, preferring breaks after commas and similar
+  let words = sentence.split(' ').filter(Boolean);
+  words = words.flatMap(w => { const parts = []; while (w.length > max) { parts.push(w.slice(0, max)); w = w.slice(max); } parts.push(w); return parts; });
+  const n = words.length, best = new Array(n + 1).fill(null);
+  best[n] = { cost: 0, next: n };
+  for (let i = n - 1; i >= 0; i--) {
+    let len = -1;
+    for (let j = i; j < n; j++) {
+      len += words[j].length + 1;
+      if (len > max) break;
+      const rest = best[j + 1];
+      if (!rest) continue;
+      const last = j === n - 1;
+      const slack = (max - len) ** 2;
+      const bonus = !last && /[,;:—–]$/.test(words[j]) ? 600 : 0;
+      const cost = 100000 + slack - bonus + rest.cost;
+      if (!best[i] || cost < best[i].cost) best[i] = { cost, next: j + 1 };
+    }
+  }
+  const lines = [];
+  for (let i = 0; i < n; i = best[i].next) lines.push(words.slice(i, best[i].next).join(' '));
+  return lines;
+}
+
+function chunkText(text, max) {
+  text = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!text) return [];
+  if (text.length <= max) return [text];
+  const sentences = (text.match(/[^.!?]+[.!?]+["”’)]*\s*|[^.!?]+$/g) || [text]).map(x => x.trim()).filter(Boolean);
+  const out = [];
+  for (const sent of sentences) {
+    const lines = sent.length <= max ? [sent] : wrapWords(sent, max);
+    for (const l of lines) {
+      // a short whole sentence can share a line with the end of the previous sentence
+      const prev = out[out.length - 1];
+      if (prev && lines.length === 1 && /[.!?]["”’)]*$/.test(prev) && (prev + ' ' + l).length <= max) out[out.length - 1] = prev + ' ' + l;
+      else out.push(l);
+    }
+  }
+  return out;
+}
+
+const glassMax = () => Math.max(20, Number(S.glasses.maxChars) || 45);
+
+// One note becomes a few short notifications. The glasses show the title and the body of each one
+// (each cut off past about 45 characters), so every notification carries two lines: title, then body.
 function glassesParts(n) {
   const { title, body } = glassesText(n);
-  if (S.glasses.split !== 'split' || !body || S.glasses.style === 'full') return [{ title, body }];
+  if (S.glasses.split !== 'split' || S.glasses.style === 'full') return [{ title, body }];
+  const max = glassMax();
+  const tag = GLASS_TAG[n.kind] || 'Note';
+  let lines;
   if (n.kind === 'answer') {
-    // long answers: break into sentence-sized pieces
-    const sentences = body.match(/[^.!?]+[.!?]*/g) || [body];
-    const parts = []; let cur = '';
-    for (const t of sentences.map(x => x.trim()).filter(Boolean)) {
-      if ((cur + ' ' + t).trim().length > 110 && cur) { parts.push(cur); cur = t; } else cur = (cur + ' ' + t).trim();
+    lines = chunkText(n.detail, max).slice(0, 10);
+  } else {
+    const labelled = `${tag}: ${n.headline}`;
+    lines = labelled.length <= max ? [labelled] : chunkText(n.headline, max).slice(0, 3);
+    if (S.glasses.style !== 'headline') {
+      const extra = n.say ? `“${n.say.replace(/^["“]|["”]$/g, '')}”` : n.detail;
+      lines = lines.concat(chunkText(extra, max).slice(0, 5));
     }
-    if (cur) parts.push(cur);
-    return [{ title, body: '' }, ...parts.slice(0, 3).map((p, i, a) => ({ title: a.length > 1 ? `Answer ${i + 1}/${a.length}` : 'Answer', body: p }))];
   }
-  return [{ title, body: '' }, { title: n.say ? 'Say' : (GLASS_TAG[n.kind] || 'Note'), body }];
+  const out = [];
+  for (let i = 0; i < lines.length; i += 2) out.push({ title: lines[i], body: lines[i + 1] || '' });
+  return out;
 }
 
 let glassWarned = false;
@@ -865,7 +918,7 @@ function readyLine() {
 }
 
 const SET_MAP = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords' };
-const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat' };
+const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat', maxChars: 's-gMax' };
 function fillSettings() {
   for (const [k, id] of Object.entries(SET_MAP)) $('#' + id).value = S[k];
   for (const [k, id] of Object.entries(GLASS_MAP)) $('#' + id).value = S.glasses[k];
@@ -899,13 +952,13 @@ async function importSettings(file) {
   try {
     const d = JSON.parse(await file.text());
     for (const k of ['name', 'context', 'vocab', 'model', 'recapModel', 'stt', 'whisperModel', 'interval', 'minWords']) if (d[k] !== undefined) S[k] = d[k];
-    if (d.glasses && typeof d.glasses === 'object') for (const k of ['method', 'style', 'silent', 'answers', 'split', 'gap', 'repeat', 'tight']) if (d.glasses[k] !== undefined) S.glasses[k] = d.glasses[k];
+    if (d.glasses && typeof d.glasses === 'object') for (const k of ['method', 'style', 'silent', 'answers', 'split', 'gap', 'repeat', 'tight', 'maxChars']) if (d.glasses[k] !== undefined) S.glasses[k] = d.glasses[k];
     saveSettings(); fillSettings(); readyLine();
     toast('Settings imported. Add your API keys if you haven’t yet.');
   } catch (e) { toast(`That file couldn't be read: ${e.message}`); }
 }
 async function exportSettings() {
-  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers, split: S.glasses.split, gap: S.glasses.gap, repeat: S.glasses.repeat, tight: S.glasses.tight } };
+  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers, split: S.glasses.split, gap: S.glasses.gap, repeat: S.glasses.repeat, tight: S.glasses.tight, maxChars: S.glasses.maxChars } };
   const file = new File([JSON.stringify(out, null, 2)], 'CallPilot Mobile settings.json', { type: 'application/json' });
   try {
     if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] });
@@ -925,15 +978,15 @@ async function checkInterrupted() {
   }
 }
 
-// Fit the full screen on iPhone Home Screen apps, where the reported height can come up short.
+// Size the app to the area iOS actually lets a web app draw in. (iOS 26 Home Screen apps leave a band at
+// the bottom that pages can't draw into; the page background colour below makes it match the tab bar.)
 function fitScreen() {
-  let h = window.innerHeight;
-  if (standalone() && isIOS) {
-    const portrait = window.matchMedia('(orientation: portrait)').matches;
-    const full = portrait ? Math.max(screen.height, screen.width) : Math.min(screen.height, screen.width);
-    if (full > h) h = full;
-  }
+  const h = window.innerHeight;
   document.documentElement.style.setProperty('--app-h', h + 'px');
+  // When iOS keeps its own band at the bottom, the home-indicator padding is already outside the page
+  const tall = Math.max(screen.height, screen.width), short = Math.min(screen.height, screen.width);
+  const full = window.matchMedia('(orientation: portrait)').matches ? tall : short;
+  document.documentElement.classList.toggle('ios-band', isIOS && standalone() && full - h > 20);
 }
 
 function init() {
@@ -999,8 +1052,16 @@ function init() {
     $('#glassesResult').textContent = 'Sending in 3 seconds… lock the phone or switch apps if you want to test that too.';
     await sleep(3000);
     try {
-      await sendGlasses({ kind: 'question', headline: 'Ask who owns the 48-hour lead upload', say: 'Who’s on point for getting show leads into Salesforce?', detail: '' }, true);
+      await sendGlasses({ kind: 'question', headline: 'Ask who owns the 48-hour lead upload', say: 'Who’s on point for getting our show leads into Salesforce within two days?', detail: '' }, true);
       $('#glassesResult').innerHTML = '<span class="ok">Sent.</span> Did it show on your phone and glasses?';
+    } catch (e) { $('#glassesResult').innerHTML = `<span class="bad">Not sent: ${esc(e.message)}</span>`; }
+  };
+  $('#measureGlasses').onclick = async () => {
+    $('#glassesResult').textContent = 'Sending a ruler in 3 seconds…';
+    await sleep(3000);
+    try {
+      await deliver('Ruler', '05 10 15 20 25 30 35 40 45 50 55 60 65 70 75 80 85 90 95');
+      $('#glassesResult').innerHTML = 'Sent. Enter the last number you could read fully on the glasses as the "Characters per notification" (subtract 3 to be safe).';
     } catch (e) { $('#glassesResult').innerHTML = `<span class="bad">Not sent: ${esc(e.message)}</span>`; }
   };
   $('#importBtn').onclick = () => $('#importFile').click();
@@ -1028,6 +1089,6 @@ function init() {
 function confirmEnd() { return window.confirm('End the meeting and write the recap?'); }
 
 // a small hook for automated tests (inject transcript lines without a microphone)
-window.__cp = { addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
+window.__cp = { chunkText, addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
 
 init();
