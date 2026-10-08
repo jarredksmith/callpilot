@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -257,29 +257,32 @@ async function recapClaude(c) {
 // ------------------------------------------------------------------ speech to text
 const HALLUCINATIONS = /^(thank you\.?|thanks for watching\.?|you\.?|bye\.?|\.+|thank you very much\.?|subtitles by.*|♪+)$/i;
 
+// iPhone's built-in speech recognition. Every time it (re)starts, iOS plays its "bip", so this keeps one
+// session running as long as iOS allows instead of restarting after each pause. Text that iOS never marks
+// final is still taken after a short pause, without stopping the session.
 class BuiltinSTT {
   static available() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
-  constructor(h) { this.h = h; this.running = false; this.rec = null; this.lastFinal = ''; }
+  constructor(h) { this.h = h; this.running = false; this.rec = null; this.lastCommit = ''; }
   start() {
     this.running = true; this.fails = 0; this.spawn();
-    this.watch = setInterval(() => this.watchdog(), 1500);
+    this.watch = setInterval(() => this.watchdog(), 1000);
   }
   spawn() {
     if (!this.running) return;
     const R = window.SpeechRecognition || window.webkitSpeechRecognition;
     const r = new R();
-    this.rec = r; this.interim = ''; this.interimAt = Date.now(); this.activity = Date.now(); this.segStart = this.h.now();
+    this.rec = r; this.activity = Date.now();
+    this.res = [];   // per result index: { text, done (text already taken), final, changedAt, startT }
     r.lang = 'en-US'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
     r.onresult = e => {
       this.activity = Date.now(); this.fails = 0;
-      let interim = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        const res = e.results[i], txt = (res[0] && res[0].transcript || '').trim();
-        if (!txt) continue;
-        if (res.isFinal) this.commit(txt); else interim += (interim ? ' ' : '') + txt;
+        const txt = ((e.results[i][0] && e.results[i][0].transcript) || '').trim();
+        const slot = this.res[i] || (this.res[i] = { text: '', done: '', final: false, changedAt: Date.now(), startT: this.h.now() });
+        if (txt !== slot.text) { slot.text = txt; slot.changedAt = Date.now(); }
+        if (e.results[i].isFinal && !slot.final) { slot.final = true; this.take(slot); }
       }
-      if (interim !== this.interim) { this.interim = interim; this.interimAt = Date.now(); }
-      this.h.onInterim(interim);
+      this.showInterim();
     };
     r.onerror = e => {
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
@@ -290,29 +293,40 @@ class BuiltinSTT {
       }
     };
     r.onend = () => {
-      if (this.interim) { this.commit(this.interim); this.interim = ''; }
-      if (this.running) setTimeout(() => this.spawn(), 200);
+      for (const slot of this.res) if (slot) this.take(slot);
+      this.h.onInterim('');
+      if (this.running) setTimeout(() => this.spawn(), 250);
     };
-    try { r.start(); } catch (err) { this.fails++; if (this.running) setTimeout(() => this.spawn(), 800); }
+    try { r.start(); } catch (err) { this.fails++; if (this.running) setTimeout(() => this.spawn(), 1000); }
   }
-  commit(txt) {
-    txt = txt.trim();
-    if (!txt || txt === this.lastFinal || HALLUCINATIONS.test(txt)) return;
-    // iOS sometimes re-sends the whole utterance with more words on the end
-    if (this.lastFinal && txt.startsWith(this.lastFinal) && txt.length > this.lastFinal.length) txt = txt.slice(this.lastFinal.length).trim();
-    this.lastFinal = txt;
-    this.h.onText(txt, this.segStart);
-    this.segStart = this.h.now();
-    this.h.onInterim('');
+  // hand over whatever part of this result hasn't been taken yet
+  take(slot) {
+    let add;
+    if (!slot.done) add = slot.text;
+    else if (slot.text.startsWith(slot.done)) add = slot.text.slice(slot.done.length);
+    else add = slot.text.split(/\s+/).slice(slot.done.split(/\s+/).length).join(' ');   // iOS revised earlier words
+    add = add.trim();
+    slot.done = slot.text;
+    if (!add || add === this.lastCommit || HALLUCINATIONS.test(add)) return;
+    this.lastCommit = add;
+    this.h.onText(add, slot.startT);
+    slot.startT = this.h.now();
+  }
+  showInterim() {
+    const pending = this.res.filter(sl => sl && !sl.final && sl.text !== sl.done).map(sl => sl.text.slice(sl.done.length).trim()).join(' ');
+    this.h.onInterim(pending);
   }
   watchdog() {
     if (!this.running || !this.rec) return;
     const now = Date.now();
-    // iPhone often never marks a result final: close the utterance after a pause so it lands
-    if (this.interim && now - this.interimAt > 2200) { this.rec.stop(); return; }
-    if (this.interim.length > 320) { this.rec.stop(); return; }
-    // stuck (no results or end event for a long time): restart
-    if (now - this.activity > 25000) { this.activity = now; try { this.rec.abort(); } catch {} }
+    // iPhone often never marks a result final: take it after a short pause, without restarting (no bip)
+    let took = false;
+    for (const slot of this.res) {
+      if (slot && !slot.final && slot.text !== slot.done && now - slot.changedAt > 1800) { this.take(slot); took = true; }
+    }
+    if (took) this.showInterim();
+    // truly stuck (no results and no end for a long time): restart, which costs one bip
+    if (now - this.activity > 90000) { this.activity = now; try { this.rec.abort(); } catch {} }
   }
   stop() {
     this.running = false; clearInterval(this.watch);
