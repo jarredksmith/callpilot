@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.2.1';
+const VERSION = '1.3.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -16,7 +16,7 @@ const DEFAULTS = {
   name: '', context: '', claudeKey: '', model: 'claude-sonnet-5-5', recapModel: 'claude-sonnet-5-5',
   stt: 'auto', openaiKey: '', whisperModel: 'gpt-4o-mini-transcribe', vocab: '',
   interval: 40, minWords: 35,
-  glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'short', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true, maxChars: 45 },
+  glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'say', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true, maxChars: 45, titleMax: 70 },
 };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
@@ -430,69 +430,62 @@ function glassesText(n) {
 
 // Break text into pieces short enough for the glasses to show whole (they cut off long notifications).
 // Splits at sentence ends first, then at commas and similar, then between words. Never adds "…".
-function wrapWords(sentence, max) {
-  // fewest lines first, then the most even line lengths, preferring breaks after commas and similar
-  let words = sentence.split(' ').filter(Boolean);
-  words = words.flatMap(w => { const parts = []; while (w.length > max) { parts.push(w.slice(0, max)); w = w.slice(max); } parts.push(w); return parts; });
-  const n = words.length, best = new Array(n + 1).fill(null);
-  best[n] = { cost: 0, next: n };
-  for (let i = n - 1; i >= 0; i--) {
-    let len = -1;
-    for (let j = i; j < n; j++) {
-      len += words[j].length + 1;
-      if (len > max) break;
-      const rest = best[j + 1];
-      if (!rest) continue;
-      const last = j === n - 1;
-      const slack = (max - len) ** 2;
-      const bonus = !last && /[,;:—–]$/.test(words[j]) ? 600 : 0;
-      const cost = 100000 + slack - bonus + rest.cost;
-      if (!best[i] || cost < best[i].cost) best[i] = { cost, next: j + 1 };
-    }
-  }
-  const lines = [];
-  for (let i = 0; i < n; i = best[i].next) lines.push(words.slice(i, best[i].next).join(' '));
-  return lines;
-}
-
-function chunkText(text, max) {
-  text = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!text) return [];
-  if (text.length <= max) return [text];
-  const sentences = (text.match(/[^.!?]+[.!?]+["”’)]*\s*|[^.!?]+$/g) || [text]).map(x => x.trim()).filter(Boolean);
-  const out = [];
-  for (const sent of sentences) {
-    const lines = sent.length <= max ? [sent] : wrapWords(sent, max);
-    for (const l of lines) {
-      // a short whole sentence can share a line with the end of the previous sentence
-      const prev = out[out.length - 1];
-      if (prev && lines.length === 1 && /[.!?]["”’)]*$/.test(prev) && (prev + ' ' + l).length <= max) out[out.length - 1] = prev + ' ' + l;
-      else out.push(l);
-    }
-  }
-  return out;
-}
-
 const glassMax = () => Math.max(20, Number(S.glasses.maxChars) || 45);
 
-// One note becomes a few short notifications. The glasses show the title and the body of each one
-// (each cut off past about 45 characters), so every notification carries two lines: title, then body.
+const titleMax = () => Math.max(20, Number(S.glasses.titleMax) || 70);
+
+// Lay text out on the glasses' lines. Notifications alternate a title line and a body line, each with its
+// own width. Uses the fewest lines, keeps them even, and prefers breaking at sentence ends, then commas.
+function layoutLines(segments, capOf) {
+  const lines = [];
+  for (const seg of segments) {
+    let words = String(seg || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+    if (!words.length) continue;
+    const start = lines.length, minCap = Math.min(capOf(0), capOf(1));
+    words = words.flatMap(w => { const out = []; while (w.length > minCap) { out.push(w.slice(0, minCap)); w = w.slice(minCap); } out.push(w); return out; });
+    const n = words.length, memo = new Map();
+    const solve = (i, k) => {
+      if (i === n) return { cost: 0 };
+      const key = i * 100 + (k - start);
+      if (memo.has(key)) return memo.get(key);
+      const cap = capOf(k);
+      let best = null, len = -1;
+      for (let j = i; j < n; j++) {
+        len += words[j].length + 1;
+        if (len > cap) break;
+        const last = j === n - 1;
+        const w = words[j];
+        const bonus = last ? 0 : /[.!?]["”’)]*$/.test(w) ? 1500 : /[,;:—–]$/.test(w) ? 600 : 0;
+        const rest = solve(j + 1, k + 1);
+        if (!rest) continue;
+        const cost = 100000 + (cap - len) ** 2 * (last ? 0.3 : 1) - bonus + rest.cost;
+        if (!best || cost < best.cost) best = { cost, next: j + 1 };
+      }
+      memo.set(key, best);
+      return best;
+    };
+    let i = 0, k = start;
+    while (i < n) { const r = solve(i, k); lines.push(words.slice(i, r.next).join(' ')); i = r.next; k++; }
+  }
+  return lines;
+}
+function chunkText(text, max) { return layoutLines([text], () => max); }
+
+// Turn a note into notifications: line 1 of the text is the title, line 2 the body, and so on.
 function glassesParts(n) {
   const { title, body } = glassesText(n);
-  if (S.glasses.split !== 'split' || S.glasses.style === 'full') return [{ title, body }];
-  const max = glassMax();
+  const style = S.glasses.style;
+  if (S.glasses.split !== 'split' || style === 'full') return [{ title, body }];
+  const caps = k => (k % 2 === 0 ? titleMax() : glassMax());
   const tag = GLASS_TAG[n.kind] || 'Note';
-  let lines;
-  if (n.kind === 'answer') {
-    lines = chunkText(n.detail, max).slice(0, 10);
-  } else {
-    const labelled = `${tag}: ${n.headline}`;
-    lines = labelled.length <= max ? [labelled] : chunkText(n.headline, max).slice(0, 3);
-    if (S.glasses.style !== 'headline') {
-      const extra = n.say ? `“${n.say.replace(/^["“]|["”]$/g, '')}”` : n.detail;
-      lines = lines.concat(chunkText(extra, max).slice(0, 5));
-    }
-  }
+  const sayText = n.say ? n.say.replace(/^["“]|["”]$/g, '') : '';
+  let segments;
+  if (n.kind === 'answer') segments = [n.detail];
+  else if (n.kind === 'system') segments = [n.headline, n.detail];
+  else if (style === 'say') segments = [sayText || `${tag}: ${n.headline}`];
+  else if (style === 'headline') segments = [`${tag}: ${n.headline}`];
+  else segments = [`${tag}: ${n.headline}`, sayText ? `“${sayText}”` : n.detail];
+  const lines = layoutLines(segments.slice(0, 2), caps).slice(0, 12);
   const out = [];
   for (let i = 0; i < lines.length; i += 2) out.push({ title: lines[i], body: lines[i + 1] || '' });
   return out;
@@ -918,7 +911,7 @@ function readyLine() {
 }
 
 const SET_MAP = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords' };
-const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat', maxChars: 's-gMax' };
+const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat', maxChars: 's-gMax', titleMax: 's-gTitleMax' };
 function fillSettings() {
   for (const [k, id] of Object.entries(SET_MAP)) $('#' + id).value = S[k];
   for (const [k, id] of Object.entries(GLASS_MAP)) $('#' + id).value = S.glasses[k];
@@ -952,13 +945,13 @@ async function importSettings(file) {
   try {
     const d = JSON.parse(await file.text());
     for (const k of ['name', 'context', 'vocab', 'model', 'recapModel', 'stt', 'whisperModel', 'interval', 'minWords']) if (d[k] !== undefined) S[k] = d[k];
-    if (d.glasses && typeof d.glasses === 'object') for (const k of ['method', 'style', 'silent', 'answers', 'split', 'gap', 'repeat', 'tight', 'maxChars']) if (d.glasses[k] !== undefined) S.glasses[k] = d.glasses[k];
+    if (d.glasses && typeof d.glasses === 'object') for (const k of ['method', 'style', 'silent', 'answers', 'split', 'gap', 'repeat', 'tight', 'maxChars', 'titleMax']) if (d.glasses[k] !== undefined) S.glasses[k] = d.glasses[k];
     saveSettings(); fillSettings(); readyLine();
     toast('Settings imported. Add your API keys if you haven’t yet.');
   } catch (e) { toast(`That file couldn't be read: ${e.message}`); }
 }
 async function exportSettings() {
-  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers, split: S.glasses.split, gap: S.glasses.gap, repeat: S.glasses.repeat, tight: S.glasses.tight, maxChars: S.glasses.maxChars } };
+  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers, split: S.glasses.split, gap: S.glasses.gap, repeat: S.glasses.repeat, tight: S.glasses.tight, maxChars: S.glasses.maxChars, titleMax: S.glasses.titleMax } };
   const file = new File([JSON.stringify(out, null, 2)], 'CallPilot Mobile settings.json', { type: 'application/json' });
   try {
     if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] });
@@ -1060,8 +1053,11 @@ function init() {
     $('#glassesResult').textContent = 'Sending a ruler in 3 seconds…';
     await sleep(3000);
     try {
-      await deliver('Ruler', '05 10 15 20 25 30 35 40 45 50 55 60 65 70 75 80 85 90 95');
-      $('#glassesResult').innerHTML = 'Sent. Enter the last number you could read fully on the glasses as the "Characters per notification" (subtract 3 to be safe).';
+      // each number sits exactly at that character count: ".......10.......20" and so on
+      let ruler = '';
+      for (let p = 10; p <= 150; p += 10) ruler = ruler.padEnd(p - String(p).length, '.') + p;
+      await deliver(ruler, ruler.slice(0, 120));
+      $('#glassesResult').innerHTML = 'Sent. Each number marks that many characters. Enter the last number you can read fully on the <b>top</b> line as the title line, and on the <b>second</b> line as the body line.';
     } catch (e) { $('#glassesResult').innerHTML = `<span class="bad">Not sent: ${esc(e.message)}</span>`; }
   };
   $('#importBtn').onclick = () => $('#importFile').click();

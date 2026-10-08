@@ -235,7 +235,8 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
       <div id="g-common" class="gopt">
         <label for="s-gStyle">What to send</label>
         <select id="s-gStyle">
-          <option value="short">Headline + what to say (best for glasses)</option>
+          <option value="say">Just what to say (most words per notification)</option>
+          <option value="short">Headline + what to say</option>
           <option value="headline">Headline only</option>
           <option value="full">Everything</option>
         </select>
@@ -244,7 +245,9 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
           <option value="split">Split into short pieces that fit the glasses (recommended)</option>
           <option value="one">One notification per note</option>
         </select>
-        <label for="s-gMax">Characters per notification (what the glasses show without cutting off)</label>
+        <label for="s-gTitleMax">Characters in the title line (the top, bold line)</label>
+        <input id="s-gTitleMax" type="number" min="20" max="200" step="1">
+        <label for="s-gMax">Characters in the body line (the line under it)</label>
         <input id="s-gMax" type="number" min="20" max="200" step="1">
         <label for="s-gGap">Time between parts</label>
         <select id="s-gGap">
