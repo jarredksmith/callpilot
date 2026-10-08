@@ -1,6 +1,6 @@
 /* CallPilot Mobile service worker: works offline after the first load, shows notifications,
    and always prefers the newest version of the app when there's a connection. */
-const CACHE = 'callpilot-v1';
+const CACHE = 'callpilot-v2';
 const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {

@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -16,7 +16,7 @@ const DEFAULTS = {
   name: '', context: '', claudeKey: '', model: 'claude-sonnet-5-5', recapModel: 'claude-sonnet-5-5',
   stt: 'auto', openaiKey: '', whisperModel: 'gpt-4o-mini-transcribe', vocab: '',
   interval: 40, minWords: 35,
-  glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'short', silent: true, answers: true },
+  glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'short', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true },
 };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
@@ -80,7 +80,7 @@ Reply with JSON only, no prose, in exactly this shape:
  "action_items": [{"owner": "name", "item": "what", "due": "date or empty"}]}
 Rules: 0 to 2 notes per update, focused on the most recent minutes. "notes": [] is a good answer when nothing new is worth saying. Never repeat or rephrase a note already shown. Only add action items that were actually agreed in the meeting and are not already captured.`;
 
-const ASK_RULES = `You are CallPilot, {name}'s private copilot during a live, in-person meeting. He tapped a quick question. He will read your answer on smart glasses, so answer in at most 45 words, plain text, no headings, no lists unless asked. If useful, give exact wording he can say. Use the transcript (one room microphone, no speaker labels) and the background; say so if they don't cover it.`;
+const ASK_RULES = `You are CallPilot, {name}'s private copilot during a live, in-person meeting. He tapped a quick question. He will read your answer on smart glasses that show text for only a few seconds, so answer in at most 30 words, plain text, no headings, no lists unless asked. If useful, give exact wording he can say. Use the transcript (one room microphone, no speaker labels) and the background; say so if they don't cover it.`;
 
 const RECAP_RULES = `You are CallPilot. The meeting has ended. Write {name}'s private recap in Markdown from the transcript (auto-transcribed from one phone microphone in the room, so there are no speaker labels and names or words may be misheard; fix obvious errors and don't guess at what you can't tell). If the setup lists who was there, use those names for owners where the transcript makes it clear. Moments {name} bookmarked mattered to him: make sure each one is covered.
 
@@ -100,6 +100,14 @@ const KINDS = new Set(['question', 'flag', 'idea', 'action', 'correction']);
 const CHUNK_LINES = 30;
 
 const fill = s => s.replaceAll('{name}', S.name || 'me');
+const glassesOn = () => S.glasses.method !== 'off';
+function liveRules() {
+  if (!(glassesOn() && S.glasses.tight)) return LIVE_RULES;
+  return LIVE_RULES.replace('"headline": "max 10 words"', '"headline": "max 8 words"')
+    .replace('"say": "exact words he could say, max 25 words, optional"', '"say": "exact words he could say, max 15 words, optional"')
+    .replace('"detail": "max 35 words, optional"', '"detail": "max 20 words, optional"')
+    + '\nHe reads notes on smart glasses that show each one for only a few seconds, so keep them very short and plain: no parentheses, no lists.';
+}
 function systemBlocks(rules) {
   let text = fill(rules);
   if (S.context.trim()) text += `\n\n<background about ${S.name || 'me'} and his work>\n${S.context.trim()}\n</background>`;
@@ -224,7 +232,7 @@ async function liveNotes(c, forced) {
     + `Notes already shown (do not repeat):\n${shown}\nAction items already captured:\n${actionsText(c.actions)}\n\n`
     + (forced ? "He just tapped 'Note now': give him the single most useful note for this moment, even if it's small.\n" : '')
     + 'Return the JSON now.' });
-  const text = await claude({ model: S.model, max_tokens: 1500, system: systemBlocks(LIVE_RULES), messages: [{ role: 'user', content: blocks }] });
+  const text = await claude({ model: S.model, max_tokens: 1500, system: systemBlocks(liveRules()), messages: [{ role: 'user', content: blocks }] });
   return parseLive(text);
 }
 
@@ -420,38 +428,79 @@ function glassesText(n) {
   return { title, body: clip(body, style === 'full' ? 900 : 200) };
 }
 
-let glassWarned = false;
-async function sendGlasses(n, force = false) {
-  const g = S.glasses;
-  if (g.method === 'off' && !force) return 'off';
-  if (n.kind === 'answer' && !g.answers && !force) return 'skipped';
+// One note becomes one or two notifications. Splitting gives each part its own few seconds on the glasses.
+function glassesParts(n) {
   const { title, body } = glassesText(n);
-  try {
-    if (g.method === 'app') {
-      if (!('Notification' in window)) throw new Error(isIOS && !standalone() ? 'open CallPilot from its Home Screen icon first' : 'notifications are not supported here');
-      if (Notification.permission !== 'granted') throw new Error('notifications are not allowed yet (tap Allow notifications)');
-      const reg = swReg || await navigator.serviceWorker.ready;
-      await reg.showNotification(title, { body: body || ' ', tag: 'cp-' + Date.now(), silent: !!g.silent, icon: 'icon-192.png', badge: 'icon-192.png' });
-    } else if (g.method === 'pushover') {
-      if (!g.poUser || !g.poToken) throw new Error('add your Pushover user key and app token');
-      const fd = new URLSearchParams({ token: g.poToken.trim(), user: g.poUser.trim(), title, message: body || title, priority: '0' });
-      if (g.silent) fd.set('sound', 'none');
-      const r = await fetch('https://api.pushover.net/1/messages.json', { method: 'POST', body: fd });
-      if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error((j.errors || [`HTTP ${r.status}`]).join(', ')); }
-    } else if (g.method === 'ntfy') {
-      if (!g.ntfyTopic) throw new Error('set an ntfy channel name');
-      const r = await fetch('https://ntfy.sh/', { method: 'POST', body: JSON.stringify({ topic: g.ntfyTopic.trim(), title, message: body || title, priority: g.silent ? 2 : 3 }) });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    } else {
-      return 'off';
+  if (S.glasses.split !== 'split' || !body || S.glasses.style === 'full') return [{ title, body }];
+  if (n.kind === 'answer') {
+    // long answers: break into sentence-sized pieces
+    const sentences = body.match(/[^.!?]+[.!?]*/g) || [body];
+    const parts = []; let cur = '';
+    for (const t of sentences.map(x => x.trim()).filter(Boolean)) {
+      if ((cur + ' ' + t).trim().length > 110 && cur) { parts.push(cur); cur = t; } else cur = (cur + ' ' + t).trim();
+    }
+    if (cur) parts.push(cur);
+    return [{ title, body: '' }, ...parts.slice(0, 3).map((p, i, a) => ({ title: a.length > 1 ? `Answer ${i + 1}/${a.length}` : 'Answer', body: p }))];
+  }
+  return [{ title, body: '' }, { title: n.say ? 'Say' : (GLASS_TAG[n.kind] || 'Note'), body }];
+}
+
+let glassWarned = false;
+let glassQueue = Promise.resolve();
+let lastGlassNote = null;
+
+async function deliver(title, body) {
+  const g = S.glasses;
+  if (!body && g.method !== 'app') {
+    // Pushover and ntfy need a message: put the label in the title and the headline in the message
+    const m = title.match(/^([^:]{1,14}):\s*(.+)$/);
+    if (m) { title = m[1]; body = m[2]; } else body = title;
+  }
+  if (g.method === 'app') {
+    if (!('Notification' in window)) throw new Error(isIOS && !standalone() ? 'open CallPilot from its Home Screen icon first' : 'notifications are not supported here');
+    if (Notification.permission !== 'granted') throw new Error('notifications are not allowed yet (tap Allow notifications)');
+    const reg = swReg || await navigator.serviceWorker.ready;
+    await reg.showNotification(title, { body: body || '', tag: 'cp-' + Date.now() + Math.random(), silent: !!g.silent, icon: 'icon-192.png', badge: 'icon-192.png' });
+  } else if (g.method === 'pushover') {
+    if (!g.poUser || !g.poToken) throw new Error('add your Pushover user key and app token');
+    const fd = new URLSearchParams({ token: g.poToken.trim(), user: g.poUser.trim(), title, message: body, priority: '0' });
+    if (g.silent) fd.set('sound', 'none');
+    const r = await fetch('https://api.pushover.net/1/messages.json', { method: 'POST', body: fd });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error((j.errors || [`HTTP ${r.status}`]).join(', ')); }
+  } else if (g.method === 'ntfy') {
+    if (!g.ntfyTopic) throw new Error('set an ntfy channel name');
+    const r = await fetch('https://ntfy.sh/', { method: 'POST', body: JSON.stringify({ topic: g.ntfyTopic.trim(), title, message: body, priority: g.silent ? 2 : 3 }) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }
+}
+
+function sendGlasses(n, force = false) {
+  const g = S.glasses;
+  if (g.method === 'off') return Promise.resolve(force ? Promise.reject(new Error('choose how to send notes first')) : 'off');
+  if (n.kind === 'answer' && !g.answers && !force) return Promise.resolve('skipped');
+  if (n.kind !== 'system') lastGlassNote = n;
+  const parts = glassesParts(n);
+  const gap = Math.max(2, Number(g.gap) || 5) * 1000;
+  const job = glassQueue.then(async () => {
+    for (let i = 0; i < parts.length; i++) {
+      if (i) await sleep(gap);
+      await deliver(parts[i].title, parts[i].body);
     }
     glassWarned = false;
     return 'sent';
-  } catch (e) {
-    if (force) throw e;
-    if (!glassWarned) { glassWarned = true; toast(`Couldn't send to glasses: ${e.message}`); }
-    return 'failed';
-  }
+  });
+  glassQueue = job.catch(() => {}).then(() => sleep(1200));   // a short breather so notes don't stack up
+  const repeat = Number(g.repeat) || 0;
+  if (repeat && !force && n.kind !== 'system') setTimeout(() => { if (C && lastGlassNote === n) sendGlassesAgain(n); }, repeat * 1000 + (parts.length - 1) * gap);
+  if (force) return job;
+  return job.catch(e => { if (!glassWarned) { glassWarned = true; toast(`Couldn't send to glasses: ${e.message}`); } return 'failed'; });
+}
+function sendGlassesAgain(n) { const r = S.glasses.repeat; S.glasses.repeat = '0'; sendGlasses(n); S.glasses.repeat = r; }
+function replayLast() {
+  if (!lastGlassNote) { toast('No note to replay yet.'); return; }
+  if (S.glasses.method === 'off') { toast('Glasses are off in Settings.'); return; }
+  sendGlassesAgain(lastGlassNote);
+  if (!$('#pocket').classList.contains('on')) toast('Replaying the last note.');
 }
 
 // ------------------------------------------------------------------ live meeting state
@@ -816,11 +865,11 @@ function readyLine() {
 }
 
 const SET_MAP = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords' };
-const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle' };
+const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat' };
 function fillSettings() {
   for (const [k, id] of Object.entries(SET_MAP)) $('#' + id).value = S[k];
   for (const [k, id] of Object.entries(GLASS_MAP)) $('#' + id).value = S.glasses[k];
-  $('#s-gSilent').checked = !!S.glasses.silent; $('#s-gAnswers').checked = !!S.glasses.answers;
+  $('#s-gSilent').checked = !!S.glasses.silent; $('#s-gAnswers').checked = !!S.glasses.answers; $('#s-gTight').checked = !!S.glasses.tight;
   showGlassOpts();
 }
 function bindSettings() {
@@ -829,12 +878,11 @@ function bindSettings() {
     const el = $('#' + id); el.value = S[k];
     el.addEventListener('change', () => { S[k] = el.type === 'number' ? Math.max(Number(el.min) || 0, Number(el.value) || DEFAULTS[k]) : el.value; saveSettings(); readyLine(); });
   }
-  const g = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle' };
-  for (const [k, id] of Object.entries(g)) {
+  for (const [k, id] of Object.entries(GLASS_MAP)) {
     const el = $('#' + id); el.value = S.glasses[k];
     el.addEventListener('change', () => { S.glasses[k] = el.value.trim(); saveSettings(); showGlassOpts(); readyLine(); });
   }
-  for (const [k, id] of [['silent', 's-gSilent'], ['answers', 's-gAnswers']]) {
+  for (const [k, id] of [['silent', 's-gSilent'], ['answers', 's-gAnswers'], ['tight', 's-gTight']]) {
     const el = $('#' + id); el.checked = !!S.glasses[k];
     el.addEventListener('change', () => { S.glasses[k] = el.checked; saveSettings(); });
   }
@@ -851,13 +899,13 @@ async function importSettings(file) {
   try {
     const d = JSON.parse(await file.text());
     for (const k of ['name', 'context', 'vocab', 'model', 'recapModel', 'stt', 'whisperModel', 'interval', 'minWords']) if (d[k] !== undefined) S[k] = d[k];
-    if (d.glasses && typeof d.glasses === 'object') for (const k of ['method', 'style', 'silent', 'answers']) if (d.glasses[k] !== undefined) S.glasses[k] = d.glasses[k];
+    if (d.glasses && typeof d.glasses === 'object') for (const k of ['method', 'style', 'silent', 'answers', 'split', 'gap', 'repeat', 'tight']) if (d.glasses[k] !== undefined) S.glasses[k] = d.glasses[k];
     saveSettings(); fillSettings(); readyLine();
     toast('Settings imported. Add your API keys if you haven’t yet.');
   } catch (e) { toast(`That file couldn't be read: ${e.message}`); }
 }
 async function exportSettings() {
-  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers } };
+  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers, split: S.glasses.split, gap: S.glasses.gap, repeat: S.glasses.repeat, tight: S.glasses.tight } };
   const file = new File([JSON.stringify(out, null, 2)], 'CallPilot Mobile settings.json', { type: 'application/json' });
   try {
     if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] });
@@ -899,8 +947,13 @@ function init() {
   $('#pauseBtn').onclick = togglePause;
   $('#pocketBtn').onclick = openPocket;
   $('#endBtn').onclick = () => { if (confirmEnd()) endMeeting(); };
-  let lastTap = 0;
-  $('#pocket').addEventListener('click', () => { const n = Date.now(); if (n - lastTap < 450) closePocket(); lastTap = n; });
+  // pocket screen: one tap replays the last note on the glasses, two quick taps wake the screen
+  let tapTimer = null;
+  $('#pocket').addEventListener('click', () => {
+    if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; closePocket(); return; }
+    tapTimer = setTimeout(() => { tapTimer = null; replayLast(); }, 380);
+  });
+  $('#replayBtn').onclick = replayLast;
 
   $('#libSearch').addEventListener('input', renderLibrary);
   $('#library').addEventListener('click', e => { const b = e.target.closest('.lib-item'); if (b) openDetail(b.dataset.id); });
@@ -961,6 +1014,6 @@ function init() {
 function confirmEnd() { return window.confirm('End the meeting and write the recap?'); }
 
 // a small hook for automated tests (inject transcript lines without a microphone)
-window.__cp = { addLine: t => addLine(t), state: () => C, stt: () => stt, runNotes, ask, endMeeting, settings: () => S, glassesText };
+window.__cp = { addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
 
 init();

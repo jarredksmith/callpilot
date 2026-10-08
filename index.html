@@ -137,7 +137,8 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <button id="markBtn" class="btn">★ Mark</button>
         <button id="pauseBtn" class="btn">Pause</button>
         <button id="pocketBtn" class="btn">Pocket</button>
-        <button id="endBtn" class="btn danger" style="grid-column:span 2">End &amp; recap</button>
+        <button id="replayBtn" class="btn">Replay</button>
+        <button id="endBtn" class="btn danger">End</button>
       </div>
       <div class="chips" id="quickAsks"></div>
       <div id="heard" class="heard">Listening…</div>
@@ -234,6 +235,24 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
           <option value="headline">Headline only</option>
           <option value="full">Everything</option>
         </select>
+        <label for="s-gSplit">Reading time on the glasses</label>
+        <select id="s-gSplit">
+          <option value="split">Split: headline first, then what to say (recommended)</option>
+          <option value="one">One notification per note</option>
+        </select>
+        <label for="s-gGap">Time between the two parts</label>
+        <select id="s-gGap">
+          <option value="3">3 seconds</option>
+          <option value="5">5 seconds</option>
+          <option value="8">8 seconds</option>
+        </select>
+        <label for="s-gRepeat">Show each note again after</label>
+        <select id="s-gRepeat">
+          <option value="0">Don't repeat</option>
+          <option value="15">15 seconds</option>
+          <option value="30">30 seconds</option>
+        </select>
+        <label><input type="checkbox" id="s-gTight" style="width:auto;margin-right:6px">Extra-short wording (8-word headline, 15-word "say")</label>
         <label><input type="checkbox" id="s-gSilent" style="width:auto;margin-right:6px">Silent (no phone sound)</label>
         <label><input type="checkbox" id="s-gAnswers" style="width:auto;margin-right:6px">Also send Ask answers</label>
         <div class="row" style="margin-top:10px"><button class="btn small" id="testGlasses">Send a test note</button></div>
@@ -302,7 +321,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
   </div>
 </div>
 
-<div id="pocket"><div>CallPilot is listening.<br>Double-tap to wake.</div></div>
+<div id="pocket"><div>CallPilot is listening.<br>Tap: replay the last note on your glasses<br>Double-tap: wake</div></div>
 <div id="toast"></div>
 
 <script src="app.js"></script>
