@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -278,28 +278,37 @@ async function recapClaude(c) {
 const HALLUCINATIONS = /^(thank you\.?|thanks for watching\.?|you\.?|bye\.?|\.+|thank you very much\.?|subtitles by.*|♪+)$/i;
 
 // iPhone's built-in speech recognition. Every time it (re)starts, iOS plays its "bip", so this keeps one
-// session running as long as iOS allows instead of restarting after each pause. Text that iOS never marks
-// final is still taken after a short pause, without stopping the session.
+// session running as long as iOS allows instead of restarting after each pause.
+// iOS sometimes ends its session after every word or two (often after a long quiet stretch). Words are
+// therefore collected in a buffer that survives restarts, and only become a transcript line at a real
+// pause, so a sentence stays whole even when iOS chops it up. If the chopping keeps happening and an
+// OpenAI key is set (Automatic mode), CallPilot switches to Whisper.
 class BuiltinSTT {
   static available() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
-  constructor(h) { this.h = h; this.running = false; this.rec = null; this.lastCommit = ''; }
+  constructor(h) {
+    this.h = h; this.running = false; this.rec = null;
+    this.buf = ''; this.bufT = 0; this.lastPiece = ''; this.lastHeard = 0;
+    this.choppy = 0; this.quickEmpty = 0;
+  }
   start() {
     this.running = true; this.fails = 0; this.spawn();
-    this.watch = setInterval(() => this.watchdog(), 1000);
+    this.watch = setInterval(() => this.watchdog(), 250);
   }
   spawn() {
     if (!this.running) return;
     const R = window.SpeechRecognition || window.webkitSpeechRecognition;
     const r = new R();
-    this.rec = r; this.activity = Date.now();
+    this.rec = r; this.activity = Date.now(); this.sessionStart = Date.now(); this.sessionWords = 0;
     this.res = [];   // per result index: { text, done (text already taken), final, changedAt, startT }
     r.lang = 'en-US'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
     r.onresult = e => {
-      this.activity = Date.now(); this.fails = 0; this.h.onVoice();
+      if (r !== this.rec) return;
+      const now = Date.now();
+      this.activity = now; this.lastHeard = now; this.fails = 0; this.h.onVoice();
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const txt = ((e.results[i][0] && e.results[i][0].transcript) || '').trim();
-        const slot = this.res[i] || (this.res[i] = { text: '', done: '', final: false, changedAt: Date.now(), startT: this.h.now() });
-        if (txt !== slot.text) { slot.text = txt; slot.changedAt = Date.now(); }
+        const slot = this.res[i] || (this.res[i] = { text: '', done: '', final: false, changedAt: now, startT: this.h.now() });
+        if (txt !== slot.text) { slot.text = txt; slot.changedAt = now; }
         if (e.results[i].isFinal && !slot.final) { slot.final = true; this.take(slot); }
       }
       this.showInterim();
@@ -313,13 +322,25 @@ class BuiltinSTT {
       }
     };
     r.onend = () => {
-      for (const slot of this.res) if (slot) this.take(slot);
-      this.h.onInterim('');
-      if (this.running) setTimeout(() => this.spawn(), 250);
+      if (r !== this.rec) return;
+      for (const slot of this.res) if (slot) this.take(slot);   // keep the words, but don't end the sentence
+      const lasted = Date.now() - this.sessionStart;
+      // is iOS chopping sessions after a word or two?
+      if (this.sessionWords > 0 && this.sessionWords <= 3 && lasted < 4000) this.choppy++;
+      else if (this.sessionWords > 3) this.choppy = 0;
+      this.quickEmpty = (this.sessionWords === 0 && lasted < 1500) ? this.quickEmpty + 1 : 0;
+      if (this.choppy >= 6 && this.h.canFallBack()) {
+        this.flushBuf();
+        this.running = false;
+        this.h.onFatal('iPhone speech keeps cutting out.');
+        return;
+      }
+      this.showInterim();
+      if (this.running) setTimeout(() => this.spawn(), this.quickEmpty >= 3 ? 700 : 150);
     };
     try { r.start(); } catch (err) { this.fails++; if (this.running) setTimeout(() => this.spawn(), 1000); }
   }
-  // hand over whatever part of this result hasn't been taken yet
+  // move whatever part of this result hasn't been taken yet into the sentence buffer
   take(slot) {
     let add;
     if (!slot.done) add = slot.text;
@@ -327,32 +348,51 @@ class BuiltinSTT {
     else add = slot.text.split(/\s+/).slice(slot.done.split(/\s+/).length).join(' ');   // iOS revised earlier words
     add = add.trim();
     slot.done = slot.text;
-    if (!add || add === this.lastCommit || HALLUCINATIONS.test(add)) return;
-    this.lastCommit = add;
-    this.h.onText(add, slot.startT);
+    if (!add || add === this.lastPiece || HALLUCINATIONS.test(add)) return;
+    this.lastPiece = add;
+    this.sessionWords += words(add);
+    if (!this.buf) this.bufT = slot.startT;
+    this.buf = this.buf ? `${this.buf} ${add}` : add;
     slot.startT = this.h.now();
   }
-  inFlight() { return !!(this.res && this.res.some(sl => sl && sl.text !== sl.done)); }
+  // the sentence is done: it becomes a transcript line
+  flushBuf() {
+    const text = this.buf.trim();
+    this.buf = '';
+    if (text) this.h.onText(text, this.bufT);
+  }
+  pendingText() {
+    return (this.res || []).filter(sl => sl && !sl.final && sl.text !== sl.done).map(sl => sl.text.slice(sl.done.length).trim()).join(' ');
+  }
+  inFlight() { return !!this.buf || !!this.pendingText(); }
   // take words still being spoken (for long stretches with no pause)
-  flushPending() { if (this.res) { for (const sl of this.res) if (sl && !sl.final && sl.text !== sl.done) this.take(sl); this.showInterim(); } }
+  flushPending() {
+    for (const sl of this.res || []) if (sl && !sl.final && sl.text !== sl.done) this.take(sl);
+    this.flushBuf();
+    this.showInterim();
+  }
   showInterim() {
-    const pending = this.res.filter(sl => sl && !sl.final && sl.text !== sl.done).map(sl => sl.text.slice(sl.done.length).trim()).join(' ');
-    this.h.onInterim(pending);
+    this.h.onInterim([this.buf, this.pendingText()].filter(Boolean).join(' '));
   }
   watchdog() {
-    if (!this.running || !this.rec) return;
+    if (!this.running) return;
     const now = Date.now();
-    // iPhone often never marks a result final: take it after a short pause, without restarting (no bip)
-    let took = false;
-    for (const slot of this.res) {
-      if (slot && !slot.final && slot.text !== slot.done && now - slot.changedAt > 1800) { this.take(slot); took = true; }
+    // a real pause (nothing new from any session for a moment): finish the sentence
+    if (now - this.lastHeard > 1800) {
+      let took = false;
+      for (const slot of this.res || []) if (slot && !slot.final && slot.text !== slot.done) { this.take(slot); took = true; }
+      if (this.buf) { this.flushBuf(); took = true; }
+      if (took) this.showInterim();
+    } else if (this.buf.length > 400) {
+      this.flushBuf(); this.showInterim();          // very long monologue: don't let one line grow forever
     }
-    if (took) this.showInterim();
     // truly stuck (no results and no end for a long time): restart, which costs one bip
-    if (now - this.activity > 90000) { this.activity = now; try { this.rec.abort(); } catch {} }
+    if (this.rec && now - this.activity > 90000) { this.activity = now; try { this.rec.abort(); } catch {} }
   }
   stop() {
     this.running = false; clearInterval(this.watch);
+    for (const sl of this.res || []) if (sl) this.take(sl);
+    this.flushBuf();
     if (this.rec) { try { this.rec.stop(); } catch {} }
     this.rec = null;
   }
@@ -638,6 +678,7 @@ const sttHooks = {
   onInterim: txt => { $('#heard').textContent = txt ? `Hearing: ${txt}` : (C && C.paused ? 'Paused' : 'Listening…'); },
   onError: msg => toast(msg),
   onFatal: msg => fallbackToWhisper(msg),
+  canFallBack: () => S.stt === 'auto' && !!S.openaiKey.trim(),
   onLost: () => restartSTT('the microphone stopped'),
   recent: () => (C ? C.lines.filter(l => !l.mark).slice(-3).map(l => l.text).join(' ') : ''),
 };
