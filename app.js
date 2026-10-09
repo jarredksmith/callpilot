@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -615,7 +615,15 @@ function sendGlasses(n, force = false) {
   if (g.method === 'off') return Promise.resolve(force ? Promise.reject(new Error('choose how to send notes first')) : 'off');
   if (n.kind === 'answer' && !g.answers && !force) return Promise.resolve('skipped');
   if (n.kind !== 'system') lastGlassNote = n;
-  const parts = glassesParts(n);
+  let parts = glassesParts(n);
+  if (n.maxParts && parts.length > n.maxParts) {
+    // too long for the glasses: keep the first notifications and end cleanly
+    parts = parts.slice(0, n.maxParts);
+    const last = parts[parts.length - 1];
+    const key = last.body ? 'body' : 'title';
+    const cap = key === 'body' ? glassMax() : titleMax();
+    last[key] = (last[key].length + 2 > cap ? last[key].slice(0, cap - 2).replace(/\s+\S*$/, '') : last[key]).replace(/[,;:.\s]+$/, '') + ' …';
+  }
   const gap = Math.max(2, Number(g.gap) || 5) * 1000;
   const job = glassQueue.then(async () => {
     for (let i = 0; i < parts.length; i++) {
@@ -644,7 +652,7 @@ function replayLast() {
 // from the pairing code. Taps on the phone go back the same way. Must match glasses_link.py.
 const LINK_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const normCode = c => [...String(c || '').toUpperCase()].filter(ch => LINK_ALPHABET.includes(ch)).join('');
-const LINK = { es: null, d: null, lastId: null, connected: false, seen: new Set(), count: 0, lastAt: 0 };
+const LINK = { es: null, d: null, lastId: null, connected: false, seen: new Set(), count: 0, lastAt: 0, openedAt: 0 };
 
 async function sha256Bytes(str) { return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))); }
 async function deriveLink(code) {
@@ -677,41 +685,50 @@ async function linkStart() {
   renderLinkCard();
   if (!linkReady()) return;
   try { LINK.d = await deriveLink(S.linkCode); } catch (e) { linkStatus(`Can't set up the link: ${e.message}`); return; }
-  const es = new EventSource(`${linkServer()}/${LINK.d.channel}/sse?since=${LINK.lastId || '2m'}`);
+  // pick up where we left off (catch-up notes go in the list only, never to the glasses);
+  // first time: only new notes from now on
+  LINK.lastId = store.get('cp.linkLastId.' + LINK.d.channel, null);   // per pairing code
+  const since = LINK.lastId || String(Math.floor(Date.now() / 1000));
+  LINK.openedAt = Date.now() / 1000;
+  const es = new EventSource(`${linkServer()}/${LINK.d.channel}/sse?since=${since}`);
   LINK.es = es;
-  es.onopen = () => { LINK.connected = true; renderLinkCard(); };
+  es.onopen = () => {
+    LINK.connected = true; renderLinkCard();
+    linkSend('hello', '', { title: titleMax(), body: glassMax() }, true);   // tell the computer how much fits
+  };
   es.onerror = () => { LINK.connected = false; renderLinkCard(); };     // EventSource reconnects by itself
   es.onmessage = async ev => {
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if (m.event && m.event !== 'message') return;
     if (!m.id || LINK.seen.has(m.id)) return;
-    LINK.seen.add(m.id); LINK.lastId = m.id;
+    LINK.seen.add(m.id); LINK.lastId = m.id; store.set('cp.linkLastId.' + LINK.d.channel, m.id);
     let n; try { n = await linkDecrypt(LINK.d.key, m.message); } catch { return; }   // not ours / wrong code
-    if (n.t && Date.now() / 1000 - n.t > 600) return;                                  // old, skip
-    onLinkNote(n);
+    const sent = n.t || m.time || 0;
+    const catchUp = (m.time && m.time < LINK.openedAt - 2) || Date.now() / 1000 - sent > 90;
+    onLinkNote(n, catchUp);
   };
   if (!C) keepAwake(true);
 }
-function onLinkNote(n) {
-  n = Object.assign({ detail: '', say: '' }, n);
+function onLinkNote(n, catchUp = false) {
+  n = Object.assign({ detail: '', say: '' }, n, { maxParts: 2 });
   n.stamp = new Date((n.t || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   LINK.count++; LINK.lastAt = Date.now();
   renderNote(n, true, '#linkFeed');
   const feed = $('#linkFeed'); while (feed.children.length > 30) feed.lastChild.remove();
   if (C) { C.notes.push(n); renderNote(n, true); }
-  sendGlasses(n);
+  if (!catchUp) sendGlasses(n);     // notes that arrived while the app was closed: list only, no flood
   renderLinkCard();
 }
-async function linkSend(cmd, q = '') {
-  if (!linkReady() || !LINK.d) { toast('The desktop link is off.'); return; }
-  const body = await linkEncrypt(LINK.d.key, { cmd, q, t: Date.now() / 1000 });
+async function linkSend(cmd, q = '', extra = {}, quiet = false) {
+  if (!linkReady() || !LINK.d) { if (!quiet) toast('The desktop link is off.'); return; }
+  const body = await linkEncrypt(LINK.d.key, Object.assign({ cmd, q, t: Date.now() / 1000 }, extra));
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const r = await fetch(`${linkServer()}/${LINK.d.cmd}`, { method: 'POST', body });
       if (r.ok) return;
       throw new Error(`HTTP ${r.status}`);
     } catch (e) {
-      if (attempt === 2) toast(`Couldn't reach your computer: ${e.message}`);
+      if (attempt === 2) { if (!quiet) toast(`Couldn't reach your computer: ${e.message}`); }
       else await sleep(String(e.message).includes('429') ? 5000 : 1200);
     }
   }
@@ -1376,6 +1393,6 @@ function init() {
 function confirmEnd() { return window.confirm('End the meeting and write the recap?'); }
 
 // a small hook for automated tests (inject transcript lines without a microphone)
-window.__cp = { LINK, linkStart, linkSend, deriveLink, linkEncrypt, linkDecrypt, recentQuestion, tickNow: () => tick(), chunkText, addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
+window.__cp = { onLinkNote, LINK, linkStart, linkSend, deriveLink, linkEncrypt, linkDecrypt, recentQuestion, tickNow: () => tick(), chunkText, addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
 
 init();
