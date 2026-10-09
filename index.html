@@ -122,6 +122,16 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
   <section id="v-live" class="view on">
     <div id="installBanner" class="banner" hidden></div>
     <div id="setup">
+      <div id="linkCard" class="card" hidden>
+        <div class="row" style="align-items:center;flex-wrap:nowrap"><strong style="flex:1">Linked to your computer</strong><span id="linkDot" class="pill">Connecting</span></div>
+        <div class="hint">Notes from CallPilot on your computer show here and on your glasses. Keep this open; Pocket keeps the screen dark.</div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn small" id="linkPocket">Pocket</button>
+          <button class="btn small" id="linkNoteNow">Note now</button>
+          <button class="btn small" id="linkAskNext">What to ask?</button>
+        </div>
+        <div id="linkFeed" style="margin-top:12px"></div>
+      </div>
       <div class="card">
         <label for="topic">What's this meeting?</label>
         <input id="topic" type="text" placeholder="e.g. Quarterly planning meeting" autocomplete="off">
@@ -283,6 +293,15 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <button class="btn small" id="exportBtn">Export (no keys)</button>
       </div>
       <input id="importFile" type="file" accept=".json,application/json" hidden>
+    </div>
+
+    <div class="card">
+      <strong>Desktop link</strong>
+      <div class="hint">Show notes from CallPilot on your computer here and on your glasses. On the computer, tick "Phone" at the bottom of CallPilot and right-click it to see the pairing code.</div>
+      <label for="s-linkCode">Pairing code</label>
+      <input id="s-linkCode" type="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX">
+      <label><input type="checkbox" id="s-linkOn" style="width:auto;margin-right:6px">Show notes from my computer</label>
+      <div id="linkState" class="hint"></div>
     </div>
 
     <div class="card">

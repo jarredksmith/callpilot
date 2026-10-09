@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.6.2';
+const VERSION = '1.7.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -16,6 +16,7 @@ const DEFAULTS = {
   name: '', context: '', claudeKey: '', model: 'claude-sonnet-5-5', recapModel: 'claude-sonnet-5-5',
   stt: 'auto', openaiKey: '', whisperModel: 'gpt-4o-mini-transcribe', vocab: '',
   interval: 40, minWords: 35, mode: 'pause', pauseWords: 45, backstop: 30,
+  linkCode: '', linkOn: false, linkServer: 'https://ntfy.sh',
   glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'say', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true, maxChars: 45, titleMax: 70 },
 };
 const store = {
@@ -638,6 +639,96 @@ function replayLast() {
   if (!$('#pocket').classList.contains('on')) toast('Replaying the last note.');
 }
 
+// ------------------------------------------------------------------ desktop link
+// Notes from CallPilot on the computer arrive through a relay (ntfy.sh), encrypted with a key derived
+// from the pairing code. Taps on the phone go back the same way. Must match glasses_link.py.
+const LINK_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+const normCode = c => [...String(c || '').toUpperCase()].filter(ch => LINK_ALPHABET.includes(ch)).join('');
+const LINK = { es: null, d: null, lastId: null, connected: false, seen: new Set(), count: 0, lastAt: 0 };
+
+async function sha256Bytes(str) { return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))); }
+async function deriveLink(code) {
+  const c = normCode(code);
+  const h = [...await sha256Bytes('callpilot-channel:' + c)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 24);
+  const key = await crypto.subtle.importKey('raw', await sha256Bytes('callpilot-key:' + c), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  return { channel: `cp-${h}`, cmd: `cp-${h}-cmd`, key };
+}
+async function linkDecrypt(key, b64) {
+  const raw = Uint8Array.from(atob(b64), ch => ch.charCodeAt(0));
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12) }, key, raw.slice(12));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+async function linkEncrypt(key, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj))));
+  const all = new Uint8Array(12 + ct.length); all.set(iv); all.set(ct, 12);
+  let bin = ''; for (const b of all) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+const linkReady = () => S.linkOn && normCode(S.linkCode).length === 16;
+const linkServer = () => (S.linkServer || 'https://ntfy.sh').replace(/\/+$/, '');
+
+function linkStop() {
+  if (LINK.es) { try { LINK.es.close(); } catch {} }
+  LINK.es = null; LINK.connected = false;
+}
+async function linkStart() {
+  linkStop();
+  renderLinkCard();
+  if (!linkReady()) return;
+  try { LINK.d = await deriveLink(S.linkCode); } catch (e) { linkStatus(`Can't set up the link: ${e.message}`); return; }
+  const es = new EventSource(`${linkServer()}/${LINK.d.channel}/sse?since=${LINK.lastId || '2m'}`);
+  LINK.es = es;
+  es.onopen = () => { LINK.connected = true; renderLinkCard(); };
+  es.onerror = () => { LINK.connected = false; renderLinkCard(); };     // EventSource reconnects by itself
+  es.onmessage = async ev => {
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.event && m.event !== 'message') return;
+    if (!m.id || LINK.seen.has(m.id)) return;
+    LINK.seen.add(m.id); LINK.lastId = m.id;
+    let n; try { n = await linkDecrypt(LINK.d.key, m.message); } catch { return; }   // not ours / wrong code
+    if (n.t && Date.now() / 1000 - n.t > 600) return;                                  // old, skip
+    onLinkNote(n);
+  };
+  if (!C) keepAwake(true);
+}
+function onLinkNote(n) {
+  n = Object.assign({ detail: '', say: '' }, n);
+  n.stamp = new Date((n.t || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  LINK.count++; LINK.lastAt = Date.now();
+  renderNote(n, true, '#linkFeed');
+  const feed = $('#linkFeed'); while (feed.children.length > 30) feed.lastChild.remove();
+  if (C) { C.notes.push(n); renderNote(n, true); }
+  sendGlasses(n);
+  renderLinkCard();
+}
+async function linkSend(cmd, q = '') {
+  if (!linkReady() || !LINK.d) { toast('The desktop link is off.'); return; }
+  const body = await linkEncrypt(LINK.d.key, { cmd, q, t: Date.now() / 1000 });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await fetch(`${linkServer()}/${LINK.d.cmd}`, { method: 'POST', body });
+      if (r.ok) return;
+      throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+      if (attempt === 2) toast(`Couldn't reach your computer: ${e.message}`);
+      else await sleep(String(e.message).includes('429') ? 5000 : 1200);
+    }
+  }
+}
+function linkStatus(text) { const el = $('#linkState'); if (el) el.textContent = text; }
+function renderLinkCard() {
+  const card = $('#linkCard');
+  if (!card) return;
+  card.hidden = !linkReady();
+  const dot = $('#linkDot');
+  dot.textContent = LINK.connected ? 'Connected' : 'Connecting';
+  dot.className = 'pill ' + (LINK.connected ? 'live' : 'pause');
+  if (!S.linkOn) linkStatus('Off.');
+  else if (normCode(S.linkCode).length !== 16) linkStatus('Enter the 16-character code from your computer.');
+  else linkStatus(LINK.connected ? `Connected.${LINK.count ? ` ${LINK.count} note${LINK.count > 1 ? 's' : ''} received.` : ' Waiting for notes from your computer.'}` : 'Connecting…');
+}
+
 // ------------------------------------------------------------------ live meeting state
 let C = null;               // the current meeting
 let stt = null;             // the speech engine in use
@@ -838,8 +929,8 @@ function pushSystem(text) {
   renderNote(n, false);
 }
 
-function renderNote(n, fresh) {
-  const feed = $('#feed');
+function renderNote(n, fresh, target = '#feed') {
+  const feed = $(target);
   $$('.note.fresh', feed).forEach(el => el.classList.remove('fresh'));
   const el = document.createElement('div');
   el.className = `note k-${n.kind}${fresh ? ' fresh' : ''}`;
@@ -905,7 +996,7 @@ async function endMeeting() {
   await sleep(400);
   stt = null;
   meeting.ended = Date.now(); meeting.status = 'ended';
-  keepAwake(false); closePocket();
+  keepAwake(linkReady()); closePocket();
   C = null;
   $('#live').hidden = true; $('#setup').hidden = false; $('#timer').textContent = '';
   $('#topic').value = ''; $('#people').value = ''; $('#focus').value = '';   // fresh setup for the next meeting
@@ -1063,6 +1154,7 @@ function readyLine() {
   else ib.hidden = true;
 }
 
+const LINK_MAP = { linkCode: 's-linkCode' };
 const SET_MAP = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords', mode: 's-mode', pauseWords: 's-pauseWords', backstop: 's-backstop' };
 const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat', maxChars: 's-gMax', titleMax: 's-gTitleMax' };
 function fillSettings() {
@@ -1081,6 +1173,14 @@ function bindSettings() {
     const el = $('#' + id); el.value = S.glasses[k];
     el.addEventListener('change', () => { S.glasses[k] = el.value.trim(); saveSettings(); showGlassOpts(); readyLine(); });
   }
+  const lc = $('#s-linkCode'); lc.value = S.linkCode;
+  lc.addEventListener('change', () => {
+    const c = normCode(lc.value);
+    S.linkCode = c.length === 16 ? c.match(/.{4}/g).join('-') : lc.value.trim();
+    lc.value = S.linkCode; saveSettings(); linkStart();
+  });
+  const lo = $('#s-linkOn'); lo.checked = !!S.linkOn;
+  lo.addEventListener('change', () => { S.linkOn = lo.checked; saveSettings(); linkStart(); });
   for (const [k, id] of [['silent', 's-gSilent'], ['answers', 's-gAnswers'], ['tight', 's-gTight']]) {
     const el = $('#' + id); el.checked = !!S.glasses[k];
     el.addEventListener('change', () => { S.glasses[k] = el.checked; saveSettings(); });
@@ -1172,7 +1272,11 @@ function init() {
     if (!gesture) {                          // first finger down: a new gesture starts
       gesture = true; held = false; maxTouches = 0; pressStart = Date.now();
       clearTimeout(holdTimer);
-      holdTimer = setTimeout(() => { if (maxTouches === 1) { held = true; pocketHint('Note requested'); runNotes(true); } }, 650);
+      holdTimer = setTimeout(() => {
+        if (maxTouches !== 1) return;
+        held = true; pocketHint('Note requested');
+        if (C) runNotes(true); else linkSend('note_now');
+      }, 650);
     }
     maxTouches = Math.max(maxTouches, e.touches.length);
   }, { passive: false });
@@ -1183,7 +1287,11 @@ function init() {
     clearTimeout(holdTimer);
     const fingers = maxTouches; maxTouches = 0;
     if (held) return;
-    if (fingers >= 2) { pocketHint('Asking what to ask next'); ask('What should I ask next?'); return; }
+    if (fingers >= 2) {
+      pocketHint('Asking what to ask next');
+      if (C) ask('What should I ask next?'); else linkSend('ask', 'What should I ask next?');
+      return;
+    }
     if (tapTimer) { clearTimeout(tapTimer); tapTimer = null; closePocket(); return; }
     tapTimer = setTimeout(() => { tapTimer = null; pocketHint('Replaying'); replayLast(); }, 380);
   }, { passive: false });
@@ -1192,6 +1300,9 @@ function init() {
     tapTimer = setTimeout(() => { tapTimer = null; replayLast(); }, 380);
   });
   $('#replayBtn').onclick = replayLast;
+  $('#linkPocket').onclick = openPocket;
+  $('#linkNoteNow').onclick = () => { linkSend('note_now'); toast('Asked your computer for a note.'); };
+  $('#linkAskNext').onclick = () => { linkSend('ask', 'What should I ask next?'); toast('Asked your computer.'); };
 
   $('#libSearch').addEventListener('input', renderLibrary);
   $('#library').addEventListener('click', e => { const b = e.target.closest('.lib-item'); if (b) openDetail(b.dataset.id); });
@@ -1243,6 +1354,7 @@ function init() {
   $('#exportBtn').onclick = exportSettings;
 
   document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && linkReady()) linkStart();     // iOS drops the connection in the background; catch up
     if (!C) return;
     if (document.hidden) { hiddenAt = nowSec(); return; }
     keepAwake(true);
@@ -1258,11 +1370,12 @@ function init() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').then(r => { swReg = r; }).catch(() => {});
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   checkInterrupted();
+  linkStart();
 }
 
 function confirmEnd() { return window.confirm('End the meeting and write the recap?'); }
 
 // a small hook for automated tests (inject transcript lines without a microphone)
-window.__cp = { recentQuestion, tickNow: () => tick(), chunkText, addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
+window.__cp = { LINK, linkStart, linkSend, deriveLink, linkEncrypt, linkDecrypt, recentQuestion, tickNow: () => tick(), chunkText, addLine: t => addLine(t), state: () => C, stt: () => stt, glassesParts, liveRules, replayLast, runNotes, ask, endMeeting, settings: () => S, glassesText };
 
 init();
