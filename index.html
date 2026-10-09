@@ -124,13 +124,13 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
     <div id="setup">
       <div class="card">
         <label for="topic">What's this meeting?</label>
-        <input id="topic" type="text" placeholder="e.g. Events planning with Kim" autocomplete="off">
+        <input id="topic" type="text" placeholder="e.g. Quarterly planning meeting" autocomplete="off">
         <label for="callType">Type</label>
         <select id="callType"></select>
         <label for="people">Who's there (optional)</label>
-        <input id="people" type="text" placeholder="Kim, Rachel" autocomplete="off">
+        <input id="people" type="text" placeholder="e.g. Alex, Sam" autocomplete="off">
         <label for="focus">What do you want help with? (optional)</label>
-        <textarea id="focus" rows="2" style="min-height:64px" placeholder="e.g. Get Kim's sign-off on the show list; flag any budget cuts."></textarea>
+        <textarea id="focus" rows="2" style="min-height:64px" placeholder="e.g. Get a decision on next steps; flag any budget concerns."></textarea>
         <button id="startBtn" class="btn go">Start listening</button>
         <div id="readyLine" class="hint"></div>
       </div>
@@ -208,7 +208,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <option value="whisper-1">whisper-1</option>
       </select>
       <label for="s-vocab">Words it should know (names, acronyms)</label>
-      <input id="s-vocab" type="text" placeholder="ATG, CEMS, LDAR, StackVision, Pardot">
+      <input id="s-vocab" type="text" placeholder="e.g. company names, product names, acronyms">
     </div>
 
     <div class="card">
@@ -320,7 +320,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
 <div id="askSheet" class="sheet">
   <div class="box">
     <h2>Ask about this meeting</h2>
-    <textarea id="askInput" rows="3" placeholder="e.g. What did Kim say the budget was?"></textarea>
+    <textarea id="askInput" rows="3" placeholder="e.g. What did they say the budget was?"></textarea>
     <div class="chips" id="askChips" style="margin-top:10px"></div>
     <div class="row"><button class="btn" id="askCancel">Cancel</button><button class="btn primary" id="askSend">Ask</button></div>
   </div>

@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.6.1';
+const VERSION = '1.6.2';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1223,7 +1223,7 @@ function init() {
     $('#glassesResult').textContent = 'Sending in 3 seconds… lock the phone or switch apps if you want to test that too.';
     await sleep(3000);
     try {
-      await sendGlasses({ kind: 'question', headline: 'Ask who owns the 48-hour lead upload', say: 'Who’s on point for getting our show leads into Salesforce within two days?', detail: '' }, true);
+      await sendGlasses({ kind: 'question', headline: 'Ask who owns the next step', say: 'Who’s taking the lead on this, and when should we check back in?', detail: '', glance: null }, true);
       $('#glassesResult').innerHTML = '<span class="ok">Sent.</span> Did it show on your phone and glasses?';
     } catch (e) { $('#glassesResult').innerHTML = `<span class="bad">Not sent: ${esc(e.message)}</span>`; }
   };
