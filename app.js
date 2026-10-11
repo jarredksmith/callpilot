@@ -3,7 +3,7 @@
    Claude, and everything is stored on this phone only. */
 'use strict';
 
-const VERSION = '1.7.1';
+const VERSION = '1.8.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -14,7 +14,7 @@ const standalone = () => window.matchMedia('(display-mode: standalone)').matches
 // ------------------------------------------------------------------ settings
 const DEFAULTS = {
   name: '', context: '', claudeKey: '', model: 'claude-sonnet-5-5', recapModel: 'claude-sonnet-5-5',
-  stt: 'auto', openaiKey: '', whisperModel: 'gpt-4o-mini-transcribe', vocab: '',
+  stt: 'auto', openaiKey: '', whisperModel: 'gpt-4o-mini-transcribe', vocab: '', lang: 'en-US', notesLang: 'en',
   interval: 40, minWords: 35, mode: 'pause', pauseWords: 45, backstop: 30,
   linkCode: '', linkOn: false, linkServer: 'https://ntfy.sh',
   glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'say', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true, maxChars: 45, titleMax: 70 },
@@ -26,6 +26,42 @@ const store = {
 let S = Object.assign({}, DEFAULTS, store.get('cp.settings', {}));
 S.glasses = Object.assign({}, DEFAULTS.glasses, S.glasses || {});
 const saveSettings = () => store.set('cp.settings', S);
+
+// ------------------------------------------------------------------ languages
+// [iPhone speech code, Whisper code, name]
+const LANGS = [
+  ['en-US', 'en', 'English (US)'], ['en-GB', 'en', 'English (UK)'], ['en-AU', 'en', 'English (Australia)'], ['en-IN', 'en', 'English (India)'],
+  ['es-MX', 'es', 'Spanish (Mexico / US)'], ['es-ES', 'es', 'Spanish (Spain)'], ['fr-FR', 'fr', 'French'], ['fr-CA', 'fr', 'French (Canada)'],
+  ['de-DE', 'de', 'German'], ['it-IT', 'it', 'Italian'], ['pt-BR', 'pt', 'Portuguese (Brazil)'], ['pt-PT', 'pt', 'Portuguese (Portugal)'],
+  ['nl-NL', 'nl', 'Dutch'], ['sv-SE', 'sv', 'Swedish'], ['nb-NO', 'no', 'Norwegian'], ['da-DK', 'da', 'Danish'], ['fi-FI', 'fi', 'Finnish'],
+  ['pl-PL', 'pl', 'Polish'], ['cs-CZ', 'cs', 'Czech'], ['hu-HU', 'hu', 'Hungarian'], ['ro-RO', 'ro', 'Romanian'], ['el-GR', 'el', 'Greek'],
+  ['ru-RU', 'ru', 'Russian'], ['uk-UA', 'uk', 'Ukrainian'], ['tr-TR', 'tr', 'Turkish'], ['ar-SA', 'ar', 'Arabic'], ['he-IL', 'he', 'Hebrew'],
+  ['hi-IN', 'hi', 'Hindi'], ['zh-CN', 'zh', 'Chinese (Mandarin, Simplified)'], ['zh-TW', 'zh', 'Chinese (Mandarin, Traditional)'],
+  ['ja-JP', 'ja', 'Japanese'], ['ko-KR', 'ko', 'Korean'], ['vi-VN', 'vi', 'Vietnamese'], ['th-TH', 'th', 'Thai'], ['id-ID', 'id', 'Indonesian'],
+  ['ms-MY', 'ms', 'Malay'], ['fil-PH', 'tl', 'Filipino'],
+];
+const langInfo = code => LANGS.find(l => l[0] === code) || null;
+// iPhone speech needs one language; "auto" uses the phone's own language (Whisper detects it instead)
+function speechLang() {
+  if (S.lang !== 'auto') return S.lang;
+  const nav = navigator.language || 'en-US';
+  return LANGS.find(l => l[0].toLowerCase() === nav.toLowerCase())?.[0] || LANGS.find(l => l[1] === nav.slice(0, 2).toLowerCase())?.[0] || 'en-US';
+}
+const whisperLang = () => (S.lang === 'auto' ? '' : (langInfo(S.lang) || [, 'en'])[1]);
+const meetingLangName = () => (S.lang === 'auto' ? '' : (langInfo(S.lang) || [, , 'English'])[2].replace(/ \(.*\)$/, ''));
+const NOTE_LANGS = [['en', 'English'], ['same', 'Same as the meeting'], ...[...new Map(LANGS.filter(l => l[1] !== 'en').map(l => [l[1], l[2].replace(/ \(.*\)$/, '')])).entries()]];
+const notesLangName = () => (NOTE_LANGS.find(l => l[0] === S.notesLang) || NOTE_LANGS[0])[1];
+// Tell Claude what language the meeting is in and what language to write in.
+function langRules() {
+  const meeting = meetingLangName();
+  const english = S.lang.startsWith('en') && S.notesLang === 'en';
+  if (english) return '';
+  const heard = meeting ? `The meeting is in ${meeting}, so the transcript is in ${meeting}.` : 'The meeting may be in any language (or switch between languages); the transcript is in whatever language was spoken.';
+  const write = S.notesLang === 'same'
+    ? 'Write your notes, answers and recap in the language the meeting is in.'
+    : `Write all your notes, answers and the recap in ${notesLangName()}, translating as needed. That includes the words for {name} to say. When an exact quote matters, you may keep a few words in the original language.`;
+  return `\n\nLanguage: ${heard} ${write}`;
+}
 
 // ------------------------------------------------------------------ storage (IndexedDB)
 const DB = (() => {
@@ -126,7 +162,7 @@ function liveRules() {
   return rules;
 }
 function systemBlocks(rules) {
-  let text = fill(rules);
+  let text = fill(rules + langRules());
   if (S.context.trim()) text += `\n\n<background about ${S.name || 'me'} and his work>\n${S.context.trim()}\n</background>`;
   return [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
 }
@@ -301,7 +337,7 @@ class BuiltinSTT {
     const r = new R();
     this.rec = r; this.activity = Date.now(); this.sessionStart = Date.now(); this.sessionWords = 0;
     this.res = [];   // per result index: { text, done (text already taken), final, changedAt, startT }
-    r.lang = 'en-US'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
+    r.lang = speechLang(); r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
     r.onresult = e => {
       if (r !== this.rec) return;
       const now = Date.now();
@@ -461,7 +497,7 @@ class WhisperSTT {
       const fd = new FormData();
       fd.append('file', blob, `seg.${ext}`);
       fd.append('model', S.whisperModel || 'gpt-4o-mini-transcribe');
-      fd.append('language', 'en');
+      if (whisperLang()) fd.append('language', whisperLang());   // left out = Whisper detects the language
       if (prompt) fd.append('prompt', prompt);
       fd.append('response_format', 'json');
       try {
@@ -1163,7 +1199,8 @@ function readyLine() {
   const bits = [];
   if (!S.claudeKey.trim()) bits.push('<span class="bad">Add your Claude key in Settings.</span>');
   const eng = S.stt === 'whisper' ? 'Whisper' : (BuiltinSTT.available() ? 'iPhone speech' : (S.openaiKey ? 'Whisper' : 'no speech engine'));
-  bits.push(`Speech: ${eng}`);
+  bits.push(`Speech: ${eng}${S.lang.startsWith('en') ? '' : ` (${S.lang === 'auto' ? 'auto language' : meetingLangName()})`}`);
+  if (S.notesLang !== 'en') bits.push(`Notes in ${notesLangName().toLowerCase().startsWith('same') ? 'the meeting language' : notesLangName()}`);
   bits.push(`Glasses: ${{ off: 'off', app: 'this app', pushover: 'Pushover', ntfy: 'ntfy' }[S.glasses.method]}`);
   $('#readyLine').innerHTML = bits.join(' · ');
   const ib = $('#installBanner');
@@ -1172,7 +1209,7 @@ function readyLine() {
 }
 
 const LINK_MAP = { linkCode: 's-linkCode' };
-const SET_MAP = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords', mode: 's-mode', pauseWords: 's-pauseWords', backstop: 's-backstop' };
+const SET_MAP = { claudeKey: 's-claudeKey', lang: 's-lang', notesLang: 's-notesLang', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords', mode: 's-mode', pauseWords: 's-pauseWords', backstop: 's-backstop' };
 const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat', maxChars: 's-gMax', titleMax: 's-gTitleMax' };
 function fillSettings() {
   for (const [k, id] of Object.entries(SET_MAP)) $('#' + id).value = S[k];
@@ -1181,7 +1218,10 @@ function fillSettings() {
   showGlassOpts();
 }
 function bindSettings() {
-  const map = { claudeKey: 's-claudeKey', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords', mode: 's-mode', pauseWords: 's-pauseWords', backstop: 's-backstop' };
+  $('#s-lang').innerHTML = `<option value="auto">Auto: Whisper detects it (iPhone speech uses your phone's language)</option>`
+    + LANGS.map(l => `<option value="${l[0]}">${esc(l[2])}</option>`).join('');
+  $('#s-notesLang').innerHTML = NOTE_LANGS.map(l => `<option value="${l[0]}">${esc(l[1])}</option>`).join('');
+  const map = { claudeKey: 's-claudeKey', lang: 's-lang', notesLang: 's-notesLang', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords', mode: 's-mode', pauseWords: 's-pauseWords', backstop: 's-backstop' };
   for (const [k, id] of Object.entries(map)) {
     const el = $('#' + id); el.value = S[k];
     el.addEventListener('change', () => { S[k] = el.type === 'number' ? Math.max(Number(el.min) || 0, Number(el.value) || DEFAULTS[k]) : el.value; saveSettings(); readyLine(); showTimingOpts(); });

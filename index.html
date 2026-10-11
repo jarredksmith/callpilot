@@ -217,6 +217,11 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <option value="gpt-4o-transcribe">gpt-4o-transcribe (most accurate)</option>
         <option value="whisper-1">whisper-1</option>
       </select>
+      <label for="s-lang">Meeting language</label>
+      <select id="s-lang"></select>
+      <label for="s-notesLang">Write notes in</label>
+      <select id="s-notesLang"></select>
+      <div class="hint">For a meeting in another language, pick it above (or Auto with Whisper, which also handles people switching languages). Claude can still write your notes in English.</div>
       <label for="s-vocab">Words it should know (names, acronyms)</label>
       <input id="s-vocab" type="text" placeholder="e.g. company names, product names, acronyms">
     </div>
