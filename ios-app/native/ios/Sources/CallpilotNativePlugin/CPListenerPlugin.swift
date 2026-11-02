@@ -10,6 +10,8 @@ private final class Segment {
     let request: SFSpeechAudioBufferRecognitionRequest
     var task: SFSpeechRecognitionTask?
     var text = ""
+    var raw = ""          // the recognizer's latest text for this segment
+    var base = ""         // words it dropped when it started over after a short pause
     let startedAt = Date()
     var lastChange = Date()
     var done = false
@@ -33,7 +35,7 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "flush", returnType: CAPPluginReturnPromise)
     ]
 
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private var recognizer: SFSpeechRecognizer?
     private var onDevice = true
     private var vocab: [String] = []
@@ -52,6 +54,8 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
     private var lastRestart = Date.distantPast
     private var retryScheduled = false
     private var observers: [NSObjectProtocol] = []
+    private var restartFailures = 0
+    private var announcedInterruption = false
 
     // MARK: - JS methods
 
@@ -95,6 +99,7 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             self.authorize { ok, message in
                 guard ok else { call.reject(message); return }
+                if self.running { call.resolve(["onDevice": self.onDevice]); return }   // a second start while asking
                 rec.queue = OperationQueue.main
                 self.recognizer = rec
                 self.onDevice = wantOnDevice && rec.supportsOnDeviceRecognition
@@ -114,11 +119,11 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func stop(_ call: CAPPluginCall) {
         DispatchQueue.main.async {
             guard self.running else { call.resolve(); return }
-            self.setTapRequest(nil)
-            if let seg = self.current { self.current = nil; seg.request.endAudio() }
+            if let seg = self.current { self.current = nil; self.retire(seg) }
             self.halt()
-            // give the last words a moment to come back before saying we're done
-            self.waitForLast(until: Date().addingTimeInterval(2.5)) {
+            // give the last words a moment to come back before saying we're done (only this session's)
+            let pending = self.live
+            self.waitForLast(pending, until: Date().addingTimeInterval(2.5)) {
                 self.notifyListeners("state", data: ["state": "stopped"])
                 call.resolve()
             }
@@ -162,7 +167,10 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
         running = true
         interrupted = false
         quickFailures = 0
+        restartFailures = 0
+        announcedInterruption = false
         newSegment()
+        watch?.invalidate()
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.watchdog() }
         RunLoop.main.add(timer, forMode: .common)
         watch = timer
@@ -179,10 +187,10 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
             guard let self = self else { return }
+            // appending under the lock means a request is never fed after it has been swapped out and ended
             self.tapLock.lock()
-            let request = self.tapRequest
+            self.tapRequest?.append(buffer)
             self.tapLock.unlock()
-            request?.append(buffer)
         }
         tapInstalled = true
         engine.prepare()
@@ -233,7 +241,14 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
     private func handle(_ seg: Segment, _ result: SFSpeechRecognitionResult?, _ error: Error?) {
         if seg.done { return }
         if let result = result {
-            let text = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+            let raw = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+            // The on-device recognizer sometimes starts over after a short pause and drops the earlier words
+            // from its result: keep them instead of losing them.
+            if !seg.raw.isEmpty, raw.count + 8 < seg.raw.count, !seg.raw.lowercased().hasPrefix(raw.lowercased().prefix(12)) {
+                seg.base = (seg.base + " " + seg.raw).trimmingCharacters(in: .whitespaces)
+            }
+            seg.raw = raw
+            let text = (seg.base + " " + raw).trimmingCharacters(in: .whitespaces)
             if text != seg.text {
                 seg.text = text
                 seg.lastChange = Date()
@@ -242,7 +257,7 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
             }
             if result.isFinal {
                 finish(seg)
-                if seg === current { current = nil; newSegment() }
+                if seg === current { current = nil; setTapRequest(nil); newSegment() }
                 return
             }
         }
@@ -283,9 +298,15 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
     private func rotate() {
         guard let seg = current else { return }
         current = nil
-        newSegment()
+        newSegment()          // the tap now feeds the new segment, so the old one can be ended safely
+        retire(seg)
+    }
+
+    /// Tells a segment no more audio is coming, so it delivers its final text. If that never comes back,
+    /// keep what was heard.
+    private func retire(_ seg: Segment) {
+        if seg.done { return }
         seg.request.endAudio()
-        // if the final text never comes back, keep what was heard
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self, weak seg] in
             guard let self = self, let seg = seg, !seg.done else { return }
             seg.task?.cancel()
@@ -313,18 +334,17 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
         notifyListeners("interim", data: ["text": text])
     }
 
-    private func waitForLast(until deadline: Date, then done: @escaping () -> Void) {
-        if live.allSatisfy({ $0.done }) || Date() > deadline {
-            for seg in live where !seg.done {
+    private func waitForLast(_ pending: [Segment], until deadline: Date, then done: @escaping () -> Void) {
+        if pending.allSatisfy({ $0.done }) || Date() > deadline {
+            for seg in pending where !seg.done {
                 seg.task?.cancel()
                 finish(seg)
             }
-            live.removeAll()
             done()
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.waitForLast(until: deadline, then: done)
+            self?.waitForLast(pending, until: deadline, then: done)
         }
     }
 
@@ -340,7 +360,14 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
             self?.restart()
         })
         observers.append(nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.restart()
+            // Apple's rule: after a media services reset, the audio engine has to be made again
+            guard let self = self, self.running else { return }
+            self.setTapRequest(nil)
+            self.engine = AVAudioEngine()
+            self.tapInstalled = false
+            self.addObservers()       // the route-change observer is tied to the engine object
+            self.lastRestart = .distantPast
+            self.restart()
         })
         observers.append(nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self = self, self.running else { return }
@@ -359,8 +386,11 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
               let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         if type == .began {
             interrupted = true
-            if let seg = current { current = nil; setTapRequest(nil); seg.request.endAudio() }
-            notifyListeners("state", data: ["state": "interrupted", "message": "Listening paused by the iPhone (a call or Siri)."])
+            if let seg = current { current = nil; setTapRequest(nil); retire(seg) }
+            if !announcedInterruption {
+                announcedInterruption = true
+                notifyListeners("state", data: ["state": "interrupted", "message": "Listening paused by the iPhone (a call or Siri)."])
+            }
         } else {
             restart()
         }
@@ -375,18 +405,26 @@ public class CPListenerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         lastRestart = Date()
         if engine.isRunning { engine.stop() }
-        if let seg = current { current = nil; setTapRequest(nil); seg.request.endAudio() }
+        if let seg = current { current = nil; setTapRequest(nil); retire(seg) }
         do {
             try CPAudio.shared.setListening(true)
             try startEngine()
             let wasInterrupted = interrupted
             interrupted = false
+            restartFailures = 0
+            announcedInterruption = false
             newSegment()
             if wasInterrupted { notifyListeners("state", data: ["state": "listening"]) }
         } catch {
             interrupted = true
-            notifyListeners("state", data: ["state": "interrupted", "message": "Couldn't get the microphone back yet (\(error.localizedDescription)). Trying again."])
-            scheduleRetry(after: 4.0)
+            restartFailures += 1
+            if !announcedInterruption {
+                announcedInterruption = true
+                notifyListeners("state", data: ["state": "interrupted", "message": "Couldn't get the microphone back yet. CallPilot keeps trying, and will when you open it."])
+            }
+            // iOS often refuses to restart recording from the background: try a few times, then less often
+            // (it always tries again when CallPilot comes back on screen)
+            scheduleRetry(after: restartFailures < 5 ? 4.0 : 30.0)
         }
     }
 
