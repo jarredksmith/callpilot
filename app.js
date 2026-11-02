@@ -1293,6 +1293,46 @@ async function nativeShareFile(name, text) {
 const canNativeShare = () => NATIVE && !!(NP.Filesystem && NP.Share);
 const shareCancelled = e => /cancel/i.test(String((e && e.message) || e || ''));
 
+// Turn the recap (Markdown) into clean plain text for the RayNeo iO teleprompter:
+// share the .txt to the RayNeo app (or Files), import it in the teleprompter, then
+// Play on Glasses and scroll with the crown. Far more than a notification can show.
+function teleprompterText(c) {
+  const title = `${c.topic || 'Meeting'} — ${new Date(c.started).toLocaleDateString()}`;
+  const src = (c.focus ? `## What you wanted\n${c.focus}\n\n` : '') + (c.recap || '');
+  const out = [];
+  for (const raw of src.split('\n')) {
+    const isHeading = /^#{1,6}\s/.test(raw);
+    const s = raw
+      .replace(/^#{1,6}\s*/, '')
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/\*(.+?)\*/g, '$1')
+      .replace(/`(.+?)`/g, '$1')
+      .replace(/\[(.+?)\]\((.+?)\)/g, '$1')
+      .replace(/^\s*[-*+]\s+/, '• ')
+      .trimEnd();
+    if (isHeading) out.push('', s.toUpperCase(), '');
+    else out.push(s);
+  }
+  return `${title}\n\n${out.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
+}
+
+async function glassesExport() {
+  const c = await DB.get(detailId); if (!c) return;
+  if (!c.recap) { toast('Write the recap first.'); return; }
+  const name = `${c.topic || 'Meeting'} teleprompter.txt`.replace(/[\\/:*?"<>|]/g, '-');
+  const text = teleprompterText(c);
+  if (canNativeShare()) {
+    try { await nativeShareFile(name, text); }
+    catch (e) { if (!shareCancelled(e)) toast(`Couldn't share: ${(e && e.message) || e}`); }
+    return;
+  }
+  const file = new File([text], name, { type: 'text/plain' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title: name });
+    else { const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; a.click(); }
+  } catch (e) { if (e.name !== 'AbortError') toast(`Couldn't share: ${e.message}`); }
+}
+
 async function shareDetail() {
   const c = await DB.get(detailId); if (!c) return;
   const title = `${c.topic || 'Meeting'} ${new Date(c.started).toLocaleDateString()}`;
@@ -1575,6 +1615,7 @@ function init() {
   $('#detailBack').onclick = () => { $('#detail').classList.remove('on'); renderLibrary(); };
   $('#detailSeg').addEventListener('click', async e => { const b = e.target.closest('button'); if (!b) return; detailTab = b.dataset.t; renderDetail(await DB.get(detailId)); });
   $('#detailShare').onclick = shareDetail;
+  $('#detailGlasses').onclick = glassesExport;
   $('#detailCopy').onclick = async () => { const c = await DB.get(detailId); try { await navigator.clipboard.writeText(detailText(c, detailTab)); toast('Copied.'); } catch { toast("Couldn't copy."); } };
   $('#detailEmail').onclick = async () => {
     const c = await DB.get(detailId);
