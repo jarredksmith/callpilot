@@ -1,0 +1,117 @@
+# Builds the Glasses test app (glasses-app/) on a GitHub Mac and sends it to TestFlight.
+# Same signing path as the CallPilot iPhone app (ios.yml), so it uses the same three repository secrets:
+#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8
+# The Xcode project is generated from glasses-app/project.yml with XcodeGen on the runner.
+# TestFlight needs the app to exist in App Store Connect (bundle ID com.jarredsmith.glassesio).
+name: Glasses app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - glasses-app/**
+      - .github/workflows/glasses.yml
+
+concurrency:
+  group: glasses-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      SIGNING: ${{ secrets.ASC_KEY_P8 != '' && secrets.ASC_KEY_ID != '' && secrets.ASC_ISSUER_ID != '' }}
+      PROJECT: glasses-app/Glasses.xcodeproj
+      TEAM: ${{ vars.APPLE_TEAM_ID || 'SVYYTM3LTN' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC/Contents/Developer"; fi
+          xcodebuild -version
+
+      - name: Generate the Xcode project
+        working-directory: glasses-app
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Check that it compiles (no signing key yet)
+        if: env.SIGNING != 'true'
+        run: |
+          set +e
+          xcodebuild -project "$PROJECT" -scheme Glasses -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/build.log" 2>&1
+          STATUS=$?
+          grep -E "error:|BUILD (SUCCEEDED|FAILED)" "$RUNNER_TEMP/build.log" | tail -n 80
+          grep -E "error:" "$RUNNER_TEMP/build.log" | sort -u | head -n 20 | while IFS= read -r line; do echo "::error::${line}"; done
+          exit $STATUS
+
+      - name: Save the App Store Connect key for Xcode
+        if: env.SIGNING == 'true'
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/keys"
+          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8"
+          chmod 600 "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8"
+
+      - name: Build for the App Store
+        if: env.SIGNING == 'true'
+        run: |
+          set +e
+          xcodebuild -project "$PROJECT" -scheme Glasses -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/Glasses.xcarchive" \
+            DEVELOPMENT_TEAM="$TEAM" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO archive > "$RUNNER_TEMP/build.log" 2>&1
+          STATUS=$?
+          grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" "$RUNNER_TEMP/build.log" | tail -n 80
+          [ $STATUS -eq 0 ] || tail -n 40 "$RUNNER_TEMP/build.log"
+          grep -E "error:" "$RUNNER_TEMP/build.log" | sort -u | head -n 20 | while IFS= read -r line; do echo "::error::${line}"; done
+          exit $STATUS
+
+      - name: Give the archive an ad-hoc signature
+        if: env.SIGNING == 'true'
+        run: |
+          # Built unsigned (no certificate on the runner); export re-signs with the distribution certificate.
+          codesign --force --sign - "$RUNNER_TEMP/Glasses.xcarchive/Products/Applications/Glasses.app"
+
+      - name: Sign and upload to TestFlight
+        if: env.SIGNING == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>${TEAM}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+            <key>uploadSymbols</key><true/>
+          </dict></plist>
+          PLIST
+          set +e
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Glasses.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/keys/AuthKey_${ASC_KEY_ID}.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" > "$RUNNER_TEMP/export.log" 2>&1
+          STATUS=$?
+          tail -n 60 "$RUNNER_TEMP/export.log"
+          grep -iE "error" "$RUNNER_TEMP/export.log" | sort -u | head -n 15 | while IFS= read -r line; do echo "::error::${line}"; done
+          [ $STATUS -eq 0 ] && echo "::notice::Build ${{ github.run_number }} uploaded. It shows up in TestFlight after Apple finishes processing (usually 5 to 15 minutes)."
+          exit $STATUS
+
+      - name: Remove the key
+        if: always() && env.SIGNING == 'true'
+        run: rm -rf "$RUNNER_TEMP/keys"

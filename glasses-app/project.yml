@@ -1,0 +1,33 @@
+# XcodeGen spec for the CallPilot Glasses test app. The workflow runs `xcodegen generate`
+# on the GitHub Mac, so no hand-edited .xcodeproj lives in the repo.
+name: Glasses
+options:
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: SVYYTM3LTN
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+targets:
+  Glasses:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Assets.xcassets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jarredsmith.glassesio
+        PRODUCT_NAME: Glasses
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Info.plist
+        INFOPLIST_KEY_CFBundleDisplayName: Glasses
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: "Connects to your RayNeo glasses to show text on the display."
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
