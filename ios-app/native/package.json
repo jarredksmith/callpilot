@@ -1,0 +1,9 @@
+{
+  "name": "callpilot-native",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CallPilot's own native code: on-device listening that keeps going with the phone locked, and native notifications.",
+  "capacitor": {
+    "ios": { "src": "ios" }
+  }
+}

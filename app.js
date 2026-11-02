@@ -1,15 +1,27 @@
 /* CallPilot Mobile: a silent meeting copilot that runs entirely on your phone.
    Speech is turned into text on the phone (iPhone speech) or by OpenAI Whisper, notes come from
-   Claude, and everything is stored on this phone only. */
+   Claude, and everything is stored on this phone only.
+   The same page runs as a Home Screen web app and inside the iPhone app (ios-app/, Capacitor). In the app,
+   listening and notifications are native (ios-app/native), so it keeps working with the phone locked. */
 'use strict';
 
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const standalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+// ------------------------------------------------------------------ the iPhone app
+// Inside the iPhone app, Capacitor exposes CallPilot's native plugins: CPListener (on-device speech that keeps
+// going when the phone is locked), CPNotify (native notifications) and CPApp (keeps the app working in the
+// background). On the web these are all missing and the web versions are used instead.
+const NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+const NP = NATIVE ? (window.Capacitor.Plugins || {}) : {};
+const nativeListener = () => NP.CPListener || null;
+const nativeNotify = () => NP.CPNotify || null;
+const nativeApp = () => NP.CPApp || null;
 
 // ------------------------------------------------------------------ settings
 const DEFAULTS = {
@@ -18,13 +30,18 @@ const DEFAULTS = {
   interval: 40, minWords: 35, mode: 'pause', pauseWords: 45, backstop: 30,
   linkCode: '', linkOn: false, linkServer: 'https://ntfy.sh',
   glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'say', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true, maxChars: 45, titleMax: 70 },
+  // iPhone app only: how native notifications behave, and what happens with the phone locked
+  native: { level: 'timeSensitive', clearAfter: '0', bannerInApp: true, keepScreenOn: false, linkBackground: true },
 };
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
+const firstRun = !store.get('cp.settings', null);
 let S = Object.assign({}, DEFAULTS, store.get('cp.settings', {}));
 S.glasses = Object.assign({}, DEFAULTS.glasses, S.glasses || {});
+S.native = Object.assign({}, DEFAULTS.native, S.native || {});
+if (NATIVE && firstRun) S.glasses.method = 'app';      // the app's own notifications work out of the box
 const saveSettings = () => store.set('cp.settings', S);
 
 // ------------------------------------------------------------------ languages
@@ -435,6 +452,43 @@ class BuiltinSTT {
   }
 }
 
+// The iPhone app's own speech recognition (ios-app/native, CPListener). It runs on the phone, straight from
+// the microphone: no bips, no restarts, and it keeps going with the screen locked. Each pause ends a line.
+class NativeSTT {
+  static available() { return !!nativeListener(); }
+  constructor(h) { this.h = h; this.subs = []; this.interim = ''; this.lastText = ''; this.onDevice = false; }
+  async start() {
+    const L = nativeListener();
+    const on = async (ev, cb) => { this.subs.push(await L.addListener(ev, cb)); };
+    await on('text', d => {
+      const txt = String((d && d.text) || '').trim();
+      if (!txt || txt === this.lastText || HALLUCINATIONS.test(txt)) return;
+      this.lastText = txt;
+      this.h.onText(txt, d && d.at ? this.h.fromEpoch(d.at) : undefined);
+    });
+    await on('interim', d => { this.interim = String((d && d.text) || ''); this.h.onInterim(this.interim); });
+    await on('voice', () => this.h.onVoice());
+    await on('state', d => this.h.onState(d || {}));
+    await on('fatal', d => this.h.onFatal((d && d.message) || 'iPhone speech stopped.'));
+    const vocab = S.vocab.split(/[,;\n]/).map(w => w.trim()).filter(Boolean);
+    try {
+      const r = await L.start({ lang: speechLang(), vocab, pause: 1.3, onDevice: true });
+      this.onDevice = !!(r && r.onDevice);
+    } catch (e) {
+      this.unsubscribe();
+      throw new Error((e && e.message) || 'iPhone speech could not start.');
+    }
+  }
+  inFlight() { return !!this.interim; }
+  flushPending() { nativeListener().flush().catch(() => {}); }
+  unsubscribe() { for (const s of this.subs) { try { s.remove(); } catch {} } this.subs = []; }
+  async stop() {
+    try { await nativeListener().stop(); } catch {}
+    this.unsubscribe();
+    this.interim = '';
+  }
+}
+
 class WhisperSTT {
   constructor(h) { this.h = h; this.running = false; this.queue = Promise.resolve(); this.seq = 0; this.pending = 0; }
   inFlight() { return this.pending > 0 || !!(this.seg && this.seg.voiced >= 400); }
@@ -620,6 +674,14 @@ function glassesParts(n) {
 let glassWarned = false;
 let glassQueue = Promise.resolve();
 let lastGlassNote = null;
+let glassPending = 0;           // notes still being sent (keeps the iPhone app awake until they're out)
+let notifIds = [];              // native notifications shown during this meeting (to clear at the end)
+let nativeNotifOK = null;       // last known native notification permission
+
+async function nativeNotifStatus() {
+  try { const r = await nativeNotify().status(); nativeNotifOK = r.status === 'granted' || r.status === 'provisional'; return r; }
+  catch { return null; }
+}
 
 async function deliver(title, body) {
   const g = S.glasses;
@@ -628,7 +690,14 @@ async function deliver(title, body) {
     const m = title.match(/^([^:]{1,14}):\s*(.+)$/);
     if (m) { title = m[1]; body = m[2]; } else body = title;
   }
-  if (g.method === 'app') {
+  if (g.method === 'app' && NATIVE && nativeNotify()) {
+    if (nativeNotifOK !== true) await nativeNotifStatus();
+    if (!nativeNotifOK) throw new Error('notifications are not allowed yet (tap Allow notifications in Settings)');
+    const id = 'cp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const clear = S.native.clearAfter === 'end' ? 0 : Number(S.native.clearAfter) || 0;
+    await nativeNotify().post({ id, title, body: body || '', sound: !g.silent, level: S.native.level, clearAfter: clear, actions: true });
+    if (S.native.clearAfter === 'end') notifIds.push(id);
+  } else if (g.method === 'app') {
     if (!('Notification' in window)) throw new Error(isIOS && !standalone() ? 'open CallPilot from its Home Screen icon first' : 'notifications are not supported here');
     if (Notification.permission !== 'granted') throw new Error('notifications are not allowed yet (tap Allow notifications)');
     const reg = swReg || await navigator.serviceWorker.ready;
@@ -661,6 +730,7 @@ function sendGlasses(n, force = false) {
     last[key] = (last[key].length + 2 > cap ? last[key].slice(0, cap - 2).replace(/\s+\S*$/, '') : last[key]).replace(/[,;:.\s]+$/, '') + ' …';
   }
   const gap = Math.max(2, Number(g.gap) || 5) * 1000;
+  glassPending++;
   const job = glassQueue.then(async () => {
     for (let i = 0; i < parts.length; i++) {
       if (i) await sleep(gap);
@@ -668,7 +738,7 @@ function sendGlasses(n, force = false) {
     }
     glassWarned = false;
     return 'sent';
-  });
+  }).finally(() => { glassPending--; });
   glassQueue = job.catch(() => {}).then(() => sleep(1200));   // a short breather so notes don't stack up
   const repeat = Number(g.repeat) || 0;
   if (repeat && !force && n.kind !== 'system') setTimeout(() => { if (C && lastGlassNote === n) sendGlassesAgain(n); }, repeat * 1000 + (parts.length - 1) * gap);
@@ -719,6 +789,7 @@ function linkStop() {
 async function linkStart() {
   linkStop();
   renderLinkCard();
+  updateKeepAlive();
   if (!linkReady()) return;
   try { LINK.d = await deriveLink(S.linkCode); } catch (e) { linkStatus(`Can't set up the link: ${e.message}`); return; }
   // pick up where we left off (catch-up notes go in the list only, never to the glasses);
@@ -782,6 +853,28 @@ function renderLinkCard() {
   else linkStatus(LINK.connected ? `Connected.${LINK.count ? ` ${LINK.count} note${LINK.count > 1 ? 's' : ''} received.` : ' Waiting for notes from your computer.'}` : 'Connecting…');
 }
 
+// ------------------------------------------------------------------ working with the phone locked (iPhone app)
+// The app stays awake in the background while the meeting microphone is on; with only the desktop link on,
+// it plays silence to stay awake. While in the background, the app keeps calling __cpPump, which keeps this
+// page running (iOS would otherwise pause it) and runs the meeting's checks directly.
+function updateKeepAlive() {
+  const A = nativeApp();
+  if (!A) return;
+  const listening = !!C && !C.paused && stt instanceof NativeSTT;
+  const link = linkReady() && S.native.linkBackground;
+  A.keepAlive({ on: !!C || link, silentAudio: link && !listening }).catch(() => {});
+}
+let pumpCount = 0;
+window.__cpPump = async () => {
+  pumpCount++;
+  if (bgRun) bgRun.pumps++;
+  try { if (C) tick(); } catch {}
+  const until = Date.now() + 4000;
+  // stay awake while a note is being written or sent to the glasses
+  while (Date.now() < until || ((insightBusy || glassPending > 0) && Date.now() < until + 60000)) await sleep(250);
+  return pumpCount;
+};
+
 // ------------------------------------------------------------------ live meeting state
 let C = null;               // the current meeting
 let stt = null;             // the speech engine in use
@@ -789,6 +882,7 @@ let engineName = '';
 let pendingQuestion = null, lastQuestionLine = -1;
 let insightBusy = false, pendingForce = false, lastInsight = 0, wordsAtLast = 0, hiddenAt = 0;
 let wake = null, autosaveTimer = null, tickTimer = null, lastSpeechAt = 0;
+let lastTickAt = 0, bgRun = null;   // what happened while the phone was locked (iPhone app)
 
 const nowSec = () => (C ? Math.max(0, (Date.now() - C.started) / 1000) : 0);
 const elapsed = nowSec;
@@ -804,6 +898,7 @@ function setStatus(text, cls = '') { const el = $('#status'); el.textContent = t
 function baseStatus() {
   if (!C) return setStatus('Ready');
   if (C.paused) return setStatus('Paused', 'pause');
+  if (C.interrupted) return setStatus('Interrupted', 'err');
   setStatus(insightBusy ? 'Thinking' : `Listening${engineName ? ' · ' + engineName : ''}`, insightBusy ? 'think' : 'live');
 }
 
@@ -817,6 +912,17 @@ function addMark(text) { if (C) { C.lines.push({ t: nowSec(), text, mark: true }
 
 const sttHooks = {
   now: () => nowSec(),
+  fromEpoch: ms => (C ? Math.max(0, (ms - C.started) / 1000) : 0),
+  onState: d => {                       // the iPhone app's listener: a call or Siri took the microphone, or it came back
+    if (!C) return;
+    if (d.state === 'interrupted') {
+      if (!C.interrupted) { C.interrupted = true; addMark('Listening interrupted'); }
+      setStatus('Interrupted', 'err');
+      if (d.message) toast(d.message);
+    } else if (d.state === 'listening' && C.interrupted) {
+      C.interrupted = false; addMark('Listening again'); baseStatus();
+    }
+  },
   onText: (txt, t) => addLine(txt, t),
   onVoice: () => { lastSpeechAt = Date.now(); },
   onInterim: txt => { $('#heard').textContent = txt ? `Hearing: ${txt}` : (C && C.paused ? 'Paused' : 'Listening…'); },
@@ -829,6 +935,10 @@ const sttHooks = {
 
 async function startSTT() {
   const want = S.stt;
+  if ((want === 'auto' || want === 'builtin') && NativeSTT.available()) {
+    stt = new NativeSTT(sttHooks); engineName = 'iPhone speech';
+    await stt.start(); return;
+  }
   if ((want === 'auto' || want === 'builtin') && BuiltinSTT.available()) {
     stt = new BuiltinSTT(sttHooks); engineName = 'iPhone speech'; stt.start(); return;
   }
@@ -858,7 +968,14 @@ async function restartSTT(why) {
   baseStatus();
 }
 
+// Keep the screen from locking. In the iPhone app that's only needed when asked for, or for Whisper (which
+// listens through the web page and stops when the screen locks); the native listener works locked.
 async function keepAwake(on) {
+  if (NATIVE) {
+    const want = on && (S.native.keepScreenOn || (!!C && !(stt instanceof NativeSTT)));
+    try { await nativeApp().keepScreenOn({ on: !!want }); } catch {}
+    return;
+  }
   try {
     if (on && 'wakeLock' in navigator) { wake = await navigator.wakeLock.request('screen'); }
     else if (!on && wake) { await wake.release(); wake = null; }
@@ -888,11 +1005,20 @@ async function startMeeting() {
   tickTimer = setInterval(tick, 250);
   autosaveTimer = setInterval(() => C && DB.put(C).catch(() => {}), 20000);
   DB.put(C).catch(() => {});
-  if (!('wakeLock' in navigator)) pushSystem('This phone may lock the screen during the meeting, which stops listening. Set Auto-Lock to Never while you use CallPilot.');
+  if (!NATIVE && !('wakeLock' in navigator)) pushSystem('This phone may lock the screen during the meeting, which stops listening. Set Auto-Lock to Never while you use CallPilot.');
+  if (NATIVE && stt instanceof NativeSTT && !store.get('cp.lockTipShown', false)) {
+    store.set('cp.lockTipShown', true);
+    pushSystem('You can lock the phone or put it in your pocket: CallPilot keeps listening and sending notes.');
+  }
+  if (NATIVE && !(stt instanceof NativeSTT)) pushSystem('Whisper listens through the screen, so the screen stays on for this meeting.');
+  updateKeepAlive();
 }
 
 function tick() {
   if (!C) return;
+  const now = Date.now();
+  if (bgRun && lastTickAt && now - lastTickAt > 5000) bgRun.frozen += now - lastTickAt;   // the iPhone paused the app
+  lastTickAt = now;
   $('#timer').textContent = mmss(nowSec());
   if (C.paused || insightBusy) return;
   const newWords = totalWords() - wordsAtLast;
@@ -944,6 +1070,7 @@ function recentQuestion() {
 async function runNotes(forced, question) {
   if (!C) return;
   if (insightBusy) { if (forced) pendingForce = true; else if (question) pendingQuestion = question; return; }
+  if (C.interrupted && !forced) return;
   if (!C.lines.some(l => !l.mark)) { if (forced) toast('Nothing heard yet.'); return; }
   insightBusy = true; baseStatus();
   lastInsight = Date.now(); wordsAtLast = totalWords();
@@ -974,6 +1101,7 @@ function addNote(n) {
   C.notes.push(n);
   renderNote(n, true);
   sendGlasses(n);
+  if (bgRun && document.hidden) bgRun.notes++;
 }
 
 function pushSystem(text) {
@@ -1011,11 +1139,11 @@ function togglePause() {
   if (!C.paused && !C.pausing) {
     const engine = stt;
     addMark('Paused'); $('#pauseBtn').textContent = 'Resume';
-    Promise.resolve(engine && engine.stop()).catch(() => {}).finally(() => { if (C && C.pausing) { C.pausing = false; C.paused = true; baseStatus(); sttHooks.onInterim(''); } });
+    Promise.resolve(engine && engine.stop()).catch(() => {}).finally(() => { if (C && C.pausing) { C.pausing = false; C.paused = true; baseStatus(); sttHooks.onInterim(''); updateKeepAlive(); } });
     C.pausing = true;
   } else {
     C.paused = false; C.pausing = false; addMark('Resumed'); $('#pauseBtn').textContent = 'Pause';
-    startSTT().catch(e => pushSystem(`Couldn't resume listening: ${e.message}`));
+    startSTT().then(updateKeepAlive).catch(e => pushSystem(`Couldn't resume listening: ${e.message}`));
   }
   sttHooks.onInterim(''); baseStatus();
 }
@@ -1049,8 +1177,10 @@ async function endMeeting() {
   await sleep(400);
   stt = null;
   meeting.ended = Date.now(); meeting.status = 'ended';
-  keepAwake(linkReady()); closePocket();
   C = null;
+  keepAwake(linkReady()); closePocket();
+  updateKeepAlive();
+  if (NATIVE && notifIds.length) { const ids = notifIds; notifIds = []; nativeNotify().clear({ ids }).catch(() => {}); }
   $('#live').hidden = true; $('#setup').hidden = false; $('#timer').textContent = '';
   $('#topic').value = ''; $('#people').value = ''; $('#focus').value = '';   // fresh setup for the next meeting
   await DB.put(meeting).catch(() => {});
@@ -1155,10 +1285,23 @@ function renderDetail(c) {
   $('#detailRecap').textContent = c.recap ? 'Rewrite recap' : 'Write recap';
 }
 
+// In the iPhone app, files are shared through the native share sheet (the web share API isn't there).
+async function nativeShareFile(name, text) {
+  const r = await NP.Filesystem.writeFile({ path: name.replace(/[\\/:*?"<>|]/g, '-'), data: text, directory: 'CACHE', encoding: 'utf8' });
+  await NP.Share.share({ title: name, files: [r.uri] });
+}
+const canNativeShare = () => NATIVE && !!(NP.Filesystem && NP.Share);
+const shareCancelled = e => /cancel/i.test(String((e && e.message) || e || ''));
+
 async function shareDetail() {
   const c = await DB.get(detailId); if (!c) return;
   const title = `${c.topic || 'Meeting'} ${new Date(c.started).toLocaleDateString()}`;
   const text = detailText(c, detailTab) || detailText(c, 'transcript');
+  if (canNativeShare()) {
+    try { await nativeShareFile(`${title} - ${detailTab}.txt`, `${title}\n\n${text}`); }
+    catch (e) { if (!shareCancelled(e)) toast(`Couldn't share: ${(e && e.message) || e}`); }
+    return;
+  }
   const file = new File([`${title}\n\n${text}`], `${title.replace(/[\\/:*?"<>|]/g, '-')} - ${detailTab}.txt`, { type: 'text/plain' });
   try {
     if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title });
@@ -1185,8 +1328,18 @@ function closeSheet() { $('#askSheet').classList.remove('on'); $('#askInput').bl
 function openPocket() { $('#pocket').classList.add('on'); }
 function closePocket() { $('#pocket').classList.remove('on'); }
 
-function refreshNotifState() {
+async function refreshNotifState() {
   const el = $('#notifState');
+  if (NATIVE && nativeNotify()) {
+    const r = await nativeNotifStatus();
+    if (!r) { el.textContent = "Couldn't check notifications."; return; }
+    const msg = { granted: 'Notifications are allowed.', provisional: 'Notifications are allowed (delivered quietly).', denied: 'Notifications are turned off for CallPilot. Tap iPhone notification settings to turn them on.', prompt: 'Not allowed yet.' }[r.status] || '';
+    const extra = r.status === 'granted' && r.timeSensitive === 'off' ? ' Time Sensitive is off for CallPilot, so a Focus mode can hold notes back.' : '';
+    const lock = r.status === 'granted' && !r.lockScreen ? ' Lock Screen notifications are off, so notes won\'t show while the phone is locked.' : '';
+    el.textContent = msg + extra + lock;
+    $('#enableNotif').hidden = r.status === 'granted';
+    return;
+  }
   if (!('Notification' in window)) el.innerHTML = isIOS && !standalone() ? 'On iPhone, add CallPilot to your Home Screen (Share > Add to Home Screen) and open it from there to allow notifications.' : 'This browser does not support notifications.';
   else el.textContent = { granted: 'Notifications are allowed.', denied: 'Notifications are blocked. Turn them on in iPhone Settings > Notifications > CallPilot.', default: 'Not allowed yet.' }[Notification.permission];
 }
@@ -1198,13 +1351,13 @@ function showGlassOpts() {
 function readyLine() {
   const bits = [];
   if (!S.claudeKey.trim()) bits.push('<span class="bad">Add your Claude key in Settings.</span>');
-  const eng = S.stt === 'whisper' ? 'Whisper' : (BuiltinSTT.available() ? 'iPhone speech' : (S.openaiKey ? 'Whisper' : 'no speech engine'));
+  const eng = S.stt === 'whisper' ? 'Whisper' : (NativeSTT.available() || BuiltinSTT.available() ? 'iPhone speech' : (S.openaiKey ? 'Whisper' : 'no speech engine'));
   bits.push(`Speech: ${eng}${S.lang.startsWith('en') ? '' : ` (${S.lang === 'auto' ? 'auto language' : meetingLangName()})`}`);
   if (S.notesLang !== 'en') bits.push(`Notes in ${notesLangName().toLowerCase().startsWith('same') ? 'the meeting language' : notesLangName()}`);
   bits.push(`Glasses: ${{ off: 'off', app: 'this app', pushover: 'Pushover', ntfy: 'ntfy' }[S.glasses.method]}`);
   $('#readyLine').innerHTML = bits.join(' · ');
   const ib = $('#installBanner');
-  if (isIOS && !standalone()) { ib.hidden = false; ib.textContent = 'For the best results, tap Share > Add to Home Screen, then open CallPilot from its icon. Set up your keys there; the Home Screen app keeps its own settings.'; }
+  if (isIOS && !standalone() && !NATIVE) { ib.hidden = false; ib.textContent = 'For the best results, tap Share > Add to Home Screen, then open CallPilot from its icon. Set up your keys there; the Home Screen app keeps its own settings.'; }
   else ib.hidden = true;
 }
 
@@ -1215,7 +1368,17 @@ function fillSettings() {
   for (const [k, id] of Object.entries(SET_MAP)) $('#' + id).value = S[k];
   for (const [k, id] of Object.entries(GLASS_MAP)) $('#' + id).value = S.glasses[k];
   $('#s-gSilent').checked = !!S.glasses.silent; $('#s-gAnswers').checked = !!S.glasses.answers; $('#s-gTight').checked = !!S.glasses.tight;
+  for (const [k, id] of Object.entries(NAT_MAP)) $('#' + id).value = S.native[k];
+  for (const [k, id] of NAT_CHECKS) $('#' + id).checked = !!S.native[k];
   showGlassOpts();
+  if (NATIVE) applyNativeSettings();
+}
+const NAT_MAP = { level: 's-nLevel', clearAfter: 's-nClear' };
+const NAT_CHECKS = [['bannerInApp', 's-nBanner'], ['keepScreenOn', 's-nScreen'], ['linkBackground', 's-nLinkBg']];
+function applyNativeSettings() {
+  if (nativeNotify()) nativeNotify().setForeground({ banner: !!S.native.bannerInApp }).catch(() => {});
+  keepAwake(!!C || linkReady());
+  updateKeepAlive();
 }
 function bindSettings() {
   $('#s-lang').innerHTML = `<option value="auto">Auto: Whisper detects it (iPhone speech uses your phone's language)</option>`
@@ -1242,6 +1405,14 @@ function bindSettings() {
     const el = $('#' + id); el.checked = !!S.glasses[k];
     el.addEventListener('change', () => { S.glasses[k] = el.checked; saveSettings(); });
   }
+  for (const [k, id] of Object.entries(NAT_MAP)) {
+    const el = $('#' + id); el.value = S.native[k];
+    el.addEventListener('change', () => { S.native[k] = el.value; saveSettings(); });
+  }
+  for (const [k, id] of NAT_CHECKS) {
+    const el = $('#' + id); el.checked = !!S.native[k];
+    el.addEventListener('change', () => { S.native[k] = el.checked; saveSettings(); if (NATIVE) applyNativeSettings(); });
+  }
   showGlassOpts(); showTimingOpts();
   $('#ver').textContent = `CallPilot Mobile ${VERSION}`;
 }
@@ -1256,12 +1427,20 @@ async function importSettings(file) {
     const d = JSON.parse(await file.text());
     for (const k of ['name', 'context', 'vocab', 'model', 'recapModel', 'stt', 'whisperModel', 'interval', 'minWords', 'mode', 'pauseWords', 'backstop']) if (d[k] !== undefined) S[k] = d[k];
     if (d.glasses && typeof d.glasses === 'object') for (const k of ['method', 'style', 'silent', 'answers', 'split', 'gap', 'repeat', 'tight', 'maxChars', 'titleMax']) if (d.glasses[k] !== undefined) S.glasses[k] = d.glasses[k];
+    if (d.native && typeof d.native === 'object') for (const k of Object.keys(DEFAULTS.native)) if (d.native[k] !== undefined) S.native[k] = d.native[k];
+    // a Home Screen web app setup with "This app" notifications: in the iPhone app those are native
+    if (NATIVE && d.glasses && d.glasses.method === 'app') S.glasses.method = 'app';
     saveSettings(); fillSettings(); readyLine();
     toast('Settings imported. Add your API keys if you haven’t yet.');
   } catch (e) { toast(`That file couldn't be read: ${e.message}`); }
 }
 async function exportSettings() {
-  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, mode: S.mode, pauseWords: S.pauseWords, backstop: S.backstop, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers, split: S.glasses.split, gap: S.glasses.gap, repeat: S.glasses.repeat, tight: S.glasses.tight, maxChars: S.glasses.maxChars, titleMax: S.glasses.titleMax } };
+  const out = { name: S.name, context: S.context, vocab: S.vocab, model: S.model, recapModel: S.recapModel, stt: S.stt, whisperModel: S.whisperModel, interval: S.interval, minWords: S.minWords, mode: S.mode, pauseWords: S.pauseWords, backstop: S.backstop, glasses: { method: S.glasses.method, style: S.glasses.style, silent: S.glasses.silent, answers: S.glasses.answers, split: S.glasses.split, gap: S.glasses.gap, repeat: S.glasses.repeat, tight: S.glasses.tight, maxChars: S.glasses.maxChars, titleMax: S.glasses.titleMax }, native: Object.assign({}, S.native) };
+  if (canNativeShare()) {
+    try { await nativeShareFile('CallPilot Mobile settings.json', JSON.stringify(out, null, 2)); }
+    catch (e) { if (!shareCancelled(e)) toast(`Couldn't share: ${(e && e.message) || e}`); }
+    return;
+  }
   const file = new File([JSON.stringify(out, null, 2)], 'CallPilot Mobile settings.json', { type: 'application/json' });
   try {
     if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file] });
@@ -1290,6 +1469,36 @@ function fitScreen() {
   const tall = Math.max(screen.height, screen.width), short = Math.min(screen.height, screen.width);
   const full = window.matchMedia('(orientation: portrait)').matches ? tall : short;
   document.documentElement.classList.toggle('ios-band', isIOS && standalone() && full - h > 20);
+}
+
+// iPhone app setup: native labels and options, notification buttons, version.
+function initNative() {
+  document.documentElement.classList.add('native');
+  $$('.native-only').forEach(el => { el.hidden = false; });
+  $$('.web-only').forEach(el => { el.hidden = true; });
+  const opt = (sel, v, text) => { const o = $(`${sel} option[value="${v}"]`); if (o) o.textContent = text; };
+  opt('#s-gMethod', 'app', 'CallPilot notifications (recommended)');
+  opt('#s-stt', 'auto', 'Automatic: iPhone speech, Whisper if it fails');
+  opt('#s-stt', 'builtin', 'iPhone speech only (free, works with the phone locked)');
+  opt('#s-stt', 'whisper', 'OpenAI Whisper only (keeps the screen on)');
+  const N = nativeNotify();
+  if (N) {
+    N.setForeground({ banner: !!S.native.bannerInApp }).catch(() => {});
+    // the buttons under a note on the Lock Screen (press and hold a note to see them)
+    N.addListener('action', d => {
+      const a = d && d.action;
+      if (a === 'note') { if (C) runNotes(true); else if (linkReady()) linkSend('note_now', '', {}, true); }
+      else if (a === 'bookmark') { if (C) bookmark(); }
+      else if (a === 'replay') replayLast();
+    });
+    nativeNotifStatus();
+    $('#notifSettings').onclick = () => N.openSettings().catch(() => {});
+  }
+  const A = nativeApp();
+  if (A) {
+    $('#appSettings').onclick = () => A.openSettings().catch(() => {});
+    A.info().then(i => { if (i && i.version) $('#ver').textContent = `CallPilot Mobile ${VERSION} · iPhone app ${i.version} (${i.build})`; }).catch(() => {});
+  }
 }
 
 function init() {
@@ -1382,6 +1591,7 @@ function init() {
     catch (e) { $('#claudeResult').innerHTML = `<span class="bad">${esc(e.message)}</span>`; }
   };
   $('#enableNotif').onclick = async () => {
+    if (NATIVE && nativeNotify()) { try { await nativeNotify().allow(); } catch {} refreshNotifState(); return; }
     if (!('Notification' in window)) { refreshNotifState(); return; }
     try { await Notification.requestPermission(); } catch {}
     refreshNotifState();
@@ -1412,7 +1622,13 @@ function init() {
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && linkReady()) linkStart();     // iOS drops the connection in the background; catch up
+    if (!document.hidden && NATIVE) nativeNotifStatus();
     if (!C) return;
+    if (stt instanceof NativeSTT) {                       // the iPhone app keeps listening with the phone locked
+      if (document.hidden) { bgRun = { at: Date.now(), lines: C.lines.filter(l => !l.mark).length, notes: 0, pumps: 0, frozen: 0 }; lastTickAt = Date.now(); return; }
+      lockedReport();
+      return;
+    }
     if (document.hidden) { hiddenAt = nowSec(); return; }
     keepAwake(true);
     if (hiddenAt && nowSec() - hiddenAt > 3) {
@@ -1424,10 +1640,28 @@ function init() {
   });
   window.addEventListener('beforeunload', () => { if (C) DB.put(C); });
 
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').then(r => { swReg = r; }).catch(() => {});
+  if (!NATIVE && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').then(r => { swReg = r; }).catch(() => {});
+  if (NATIVE) initNative();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   checkInterrupted();
   linkStart();
+}
+
+// Back on screen after the phone was locked: say what CallPilot did meanwhile, and say so plainly if iOS
+// paused it (the transcript is complete either way, but notes would have waited).
+function lockedReport() {
+  const r = bgRun; bgRun = null;
+  if (!r || !C) return;
+  const away = Date.now() - r.at;
+  if (Date.now() - lastTickAt > 5000) r.frozen += Date.now() - lastTickAt;
+  lastTickAt = Date.now();
+  if (away < 20000) return;
+  const lines = C.lines.filter(l => !l.mark).length - r.lines;
+  if (r.frozen > Math.max(15000, away * 0.25)) {
+    pushSystem(`The iPhone paused CallPilot for about ${mmss(r.frozen / 1000)} of the ${mmss(away / 1000)} the phone was locked, so notes waited until now. Nothing was lost from the transcript. If this keeps happening, turn on "Keep the screen on during meetings" in Settings.`);
+  } else {
+    toast(`While locked (${mmss(away / 1000)}): ${lines > 0 ? lines : 0} lines heard, ${r.notes} note${r.notes === 1 ? '' : 's'} sent.`);
+  }
 }
 
 function confirmEnd() { return window.confirm('End the meeting and write the recap?'); }

@@ -41,6 +41,7 @@ nav button svg{width:22px;height:22px}
 nav button.on{color:var(--accent)}
 .view{display:none}.view.on{display:block}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
+[hidden]{display:none!important}
 label{display:block;font-size:13px;color:var(--dim);margin:10px 0 5px}
 label:first-child{margin-top:0}
 input[type=text],input[type=password],input[type=number],select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 12px;outline:none;font-size:16px}
@@ -236,8 +237,24 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <option value="ntfy">ntfy app</option>
       </select>
       <div id="g-app" class="gopt">
-        <div class="row" style="margin-top:10px"><button class="btn small" id="enableNotif">Allow notifications</button></div>
+        <div class="row" style="margin-top:10px"><button class="btn small" id="enableNotif">Allow notifications</button><button class="btn small native-only" id="notifSettings" hidden>iPhone notification settings</button></div>
         <div id="notifState" class="hint"></div>
+        <div class="native-only" hidden>
+          <label for="s-nLevel">How notes arrive</label>
+          <select id="s-nLevel">
+            <option value="timeSensitive">Time Sensitive: gets through Focus and Do Not Disturb (recommended)</option>
+            <option value="active">Normal: Focus modes can hold them back</option>
+          </select>
+          <label for="s-nClear">Clear notes from the Lock Screen and Notification Center</label>
+          <select id="s-nClear">
+            <option value="0">Keep them</option>
+            <option value="60">After 1 minute</option>
+            <option value="300">After 5 minutes</option>
+            <option value="end">When the meeting ends</option>
+          </select>
+          <label><input type="checkbox" id="s-nBanner" style="width:auto;margin-right:6px">Also show a banner while CallPilot is open</label>
+          <div class="hint">Notes always go to Notification Center, which is what your glasses mirror. Press and hold a note on the Lock Screen for Note now, Bookmark and Replay.</div>
+        </div>
       </div>
       <div id="g-pushover" class="gopt">
         <label for="s-poUser">Pushover user key</label>
@@ -306,7 +323,15 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
       <label for="s-linkCode">Pairing code</label>
       <input id="s-linkCode" type="text" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX">
       <label><input type="checkbox" id="s-linkOn" style="width:auto;margin-right:6px">Show notes from my computer</label>
+      <label class="native-only" hidden><input type="checkbox" id="s-nLinkBg" style="width:auto;margin-right:6px">Keep the link running when the phone is locked</label>
       <div id="linkState" class="hint"></div>
+    </div>
+
+    <div class="card native-only" hidden>
+      <strong>Locked phone</strong>
+      <div class="hint">The iPhone app keeps listening and sending notes with the phone locked or in your pocket. If iOS ever pauses it, CallPilot tells you when you're back, and nothing is lost from the transcript.</div>
+      <label><input type="checkbox" id="s-nScreen" style="width:auto;margin-right:6px">Keep the screen on during meetings</label>
+      <div class="row" style="margin-top:10px"><button class="btn small" id="appSettings">CallPilot in iPhone Settings</button></div>
     </div>
 
     <div class="card">
@@ -370,7 +395,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
   </div>
 </div>
 
-<div id="pocket"><div>CallPilot is listening.<br>Tap: replay last note · Double-tap: wake<br>Hold: note now · Two fingers: what to ask next<div id="pocketMsg" style="margin-top:8px;min-height:16px"></div></div></div>
+<div id="pocket"><div>CallPilot is listening.<br>Tap: replay last note · Double-tap: wake<br>Hold: note now · Two fingers: what to ask next<span class="native-only" hidden><br>Or just lock the phone: CallPilot keeps going.</span><div id="pocketMsg" style="margin-top:8px;min-height:16px"></div></div></div>
 <div id="toast"></div>
 
 <script src="app.js"></script>

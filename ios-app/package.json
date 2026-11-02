@@ -1,0 +1,20 @@
+{
+  "name": "callpilot-ios",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Native iPhone wrapper for CallPilot Mobile (Capacitor). The app itself lives in ../index.html and ../app.js; native listening and notifications live in ./native.",
+  "scripts": {
+    "copy-web": "node scripts/copy-web.mjs",
+    "sync": "node scripts/copy-web.mjs && npx cap sync ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/filesystem": "^8.1.5",
+    "@capacitor/ios": "^8.5.3",
+    "@capacitor/share": "^8.0.0",
+    "callpilot-native": "file:native"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.3"
+  }
+}

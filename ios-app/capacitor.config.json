@@ -1,0 +1,12 @@
+{
+  "appId": "com.jarredsmith.callpilot",
+  "appName": "CallPilot",
+  "webDir": "www",
+  "backgroundColor": "#0f1115",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#0f1115",
+    "scrollEnabled": false,
+    "limitsNavigationsToAppBoundDomains": false
+  }
+}
