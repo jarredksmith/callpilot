@@ -314,9 +314,12 @@ final class GlassesBLE: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 UserDefaults.standard.set(s.uuid.uuidString, forKey: "vendorService")
                 line("write characteristic ready (service \(s.uuid.uuidString)); max write \(p.maximumWriteValueLength(for: .withoutResponse))B")
             }
-            if ch.uuid == RNProto.notifyChar {
+            // Subscribe to EVERY notify/indicate characteristic. For the glasses this
+            // is the reply channel; for any other device (e.g. a BLE remote/ring) this
+            // sniffs whatever it reports — press buttons and watch the RX lines.
+            if ch.properties.contains(.notify) || ch.properties.contains(.indicate) {
                 p.setNotifyValue(true, for: ch)
-                line("subscribing to glasses replies…")
+                if ch.uuid == RNProto.notifyChar { line("subscribing to glasses replies…") }
             }
         }
     }
@@ -332,7 +335,14 @@ final class GlassesBLE: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
         guard let d = ch.value else { return }
-        line("RX " + RNProto.describe([UInt8](d)))
+        let bytes = [UInt8](d)
+        if ch.uuid == RNProto.notifyChar {
+            line("RX " + RNProto.describe(bytes))      // glasses: decode the AA55 frame
+        } else {
+            // any other characteristic (e.g. the ring's AE channels): raw bytes
+            let hex = bytes.map { String(format: "%02x", $0) }.joined(separator: " ")
+            line("RX \(ch.uuid.uuidString) [\(bytes.count)B]: \(hex)")
+        }
     }
 }
 
