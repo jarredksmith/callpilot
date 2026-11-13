@@ -742,12 +742,13 @@ async function hubShow(text) {
 // One note as a single screen for Glasses Hub (no need to split it across notifications).
 function hubPart(n) {
   const tag = GLASS_TAG[n.kind] || 'Note';
-  const title = `${tag}: ${n.headline}`;
+  // Kept to what fits one screen of the glasses (about seven short lines); Glasses Hub pages anything longer.
+  const title = clip(`${tag}: ${n.headline}`, 70);
   let body = '';
-  if (n.kind === 'answer') body = n.detail || '';
-  else if (S.glasses.style === 'full') body = [n.say ? `\u201c${n.say}\u201d` : '', n.detail].filter(Boolean).join('\n');
-  else body = n.say ? `\u201c${n.say}\u201d` : (n.detail || '');
-  return { title, body: clip(body, 600) };
+  if (n.kind === 'answer') body = clip(n.detail || '', 260);
+  else if (S.glasses.style === 'full') body = clip([n.say ? `\u201c${n.say}\u201d` : '', n.detail].filter(Boolean).join('\n'), 260);
+  else body = clip(n.say ? `\u201c${n.say}\u201d` : (n.detail || ''), 150);
+  return { title, body };
 }
 
 function sendGlasses(n, force = false) {
