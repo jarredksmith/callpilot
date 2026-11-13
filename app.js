@@ -29,7 +29,7 @@ const DEFAULTS = {
   stt: 'auto', openaiKey: '', whisperModel: 'gpt-4o-mini-transcribe', vocab: '', lang: 'en-US', notesLang: 'en',
   interval: 40, minWords: 35, mode: 'pause', pauseWords: 45, backstop: 30,
   linkCode: '', linkOn: false, linkServer: 'https://ntfy.sh',
-  glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', style: 'say', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true, maxChars: 45, titleMax: 70 },
+  glasses: { method: 'off', poUser: '', poToken: '', ntfyTopic: '', hubPort: '8765', style: 'say', silent: true, answers: true, split: 'split', gap: '5', repeat: '0', tight: true, maxChars: 45, titleMax: 70 },
   // iPhone app only: how native notifications behave, and what happens with the phone locked
   native: { level: 'timeSensitive', clearAfter: '0', bannerInApp: true, keepScreenOn: false, linkBackground: true },
 };
@@ -702,6 +702,8 @@ async function deliver(title, body) {
     if (Notification.permission !== 'granted') throw new Error('notifications are not allowed yet (tap Allow notifications)');
     const reg = swReg || await navigator.serviceWorker.ready;
     await reg.showNotification(title, { body: body || '', tag: 'cp-' + Date.now() + Math.random(), silent: !!g.silent, icon: 'icon-192.png', badge: 'icon-192.png' });
+  } else if (g.method === 'hub') {
+    await hubShow([title, body].filter(Boolean).join('\n'));
   } else if (g.method === 'pushover') {
     if (!g.poUser || !g.poToken) throw new Error('add your Pushover user key and app token');
     const fd = new URLSearchParams({ token: g.poToken.trim(), user: g.poUser.trim(), title, message: body, priority: '0' });
@@ -715,13 +717,46 @@ async function deliver(title, body) {
   }
 }
 
+// Glasses Hub (a separate iPhone app) draws on the glasses' display itself. When its Local API is on,
+// CallPilot hands it each note over this phone's own loopback address; nothing leaves the phone.
+// The request goes through the native side: the web view isn't allowed to reach a local http address.
+async function hubShow(text) {
+  if (!NATIVE) throw new Error('Glasses Hub can only be reached from the CallPilot iPhone app');
+  const port = Math.min(65535, Math.max(1024, Number(S.glasses.hubPort) || 8765));
+  const url = `http://127.0.0.1:${port}/show`;
+  let reply;
+  try {
+    if (NP.CapacitorHttp) {
+      const r = await NP.CapacitorHttp.request({ url, method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8' }, data: text, connectTimeout: 4000, readTimeout: 4000 });
+      reply = typeof r.data === 'string' ? JSON.parse(r.data || '{}') : (r.data || {});
+    } else {
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: text });
+      reply = await r.json();
+    }
+  } catch {
+    throw new Error('Glasses Hub isn\u2019t answering. Open it, start its display, and turn on Local API under Apps > Live text');
+  }
+  if (reply && reply.display === 'off') throw new Error('the Glasses Hub display is off. Start it in Glasses Hub');
+}
+
+// One note as a single screen for Glasses Hub (no need to split it across notifications).
+function hubPart(n) {
+  const tag = GLASS_TAG[n.kind] || 'Note';
+  const title = `${tag}: ${n.headline}`;
+  let body = '';
+  if (n.kind === 'answer') body = n.detail || '';
+  else if (S.glasses.style === 'full') body = [n.say ? `\u201c${n.say}\u201d` : '', n.detail].filter(Boolean).join('\n');
+  else body = n.say ? `\u201c${n.say}\u201d` : (n.detail || '');
+  return { title, body: clip(body, 600) };
+}
+
 function sendGlasses(n, force = false) {
   const g = S.glasses;
   if (g.method === 'off') return Promise.resolve(force ? Promise.reject(new Error('choose how to send notes first')) : 'off');
   if (n.kind === 'answer' && !g.answers && !force) return Promise.resolve('skipped');
   if (n.kind !== 'system') lastGlassNote = n;
-  let parts = glassesParts(n);
-  if (n.maxParts && parts.length > n.maxParts) {
+  let parts = g.method === 'hub' ? [hubPart(n)] : glassesParts(n);
+  if (g.method !== 'hub' && n.maxParts && parts.length > n.maxParts) {
     // too long for the glasses: keep the first notifications and end cleanly
     parts = parts.slice(0, n.maxParts);
     const last = parts[parts.length - 1];
@@ -1386,7 +1421,7 @@ async function refreshNotifState() {
 function showTimingOpts() { $('#t-pause').hidden = S.mode === 'timer'; $('#t-timer').hidden = S.mode !== 'timer'; }
 function showGlassOpts() {
   const m = S.glasses.method;
-  $('#g-app').hidden = m !== 'app'; $('#g-pushover').hidden = m !== 'pushover'; $('#g-ntfy').hidden = m !== 'ntfy'; $('#g-common').hidden = m === 'off';
+  $('#g-app').hidden = m !== 'app'; $('#g-pushover').hidden = m !== 'pushover'; $('#g-ntfy').hidden = m !== 'ntfy'; $('#g-hub').hidden = m !== 'hub'; $('#g-common').hidden = m === 'off';
 }
 function readyLine() {
   const bits = [];
@@ -1394,7 +1429,7 @@ function readyLine() {
   const eng = S.stt === 'whisper' ? 'Whisper' : (NativeSTT.available() || BuiltinSTT.available() ? 'iPhone speech' : (S.openaiKey ? 'Whisper' : 'no speech engine'));
   bits.push(`Speech: ${eng}${S.lang.startsWith('en') ? '' : ` (${S.lang === 'auto' ? 'auto language' : meetingLangName()})`}`);
   if (S.notesLang !== 'en') bits.push(`Notes in ${notesLangName().toLowerCase().startsWith('same') ? 'the meeting language' : notesLangName()}`);
-  bits.push(`Glasses: ${{ off: 'off', app: 'this app', pushover: 'Pushover', ntfy: 'ntfy' }[S.glasses.method]}`);
+  bits.push(`Glasses: ${{ off: 'off', app: 'this app', pushover: 'Pushover', ntfy: 'ntfy', hub: 'Glasses Hub' }[S.glasses.method]}`);
   $('#readyLine').innerHTML = bits.join(' · ');
   const ib = $('#installBanner');
   if (isIOS && !standalone() && !NATIVE) { ib.hidden = false; ib.textContent = 'For the best results, tap Share > Add to Home Screen, then open CallPilot from its icon. Set up your keys there; the Home Screen app keeps its own settings.'; }
@@ -1403,7 +1438,7 @@ function readyLine() {
 
 const LINK_MAP = { linkCode: 's-linkCode' };
 const SET_MAP = { claudeKey: 's-claudeKey', lang: 's-lang', notesLang: 's-notesLang', model: 's-model', recapModel: 's-recapModel', stt: 's-stt', openaiKey: 's-openaiKey', whisperModel: 's-whisperModel', vocab: 's-vocab', name: 's-name', context: 's-context', interval: 's-interval', minWords: 's-minWords', mode: 's-mode', pauseWords: 's-pauseWords', backstop: 's-backstop' };
-const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat', maxChars: 's-gMax', titleMax: 's-gTitleMax' };
+const GLASS_MAP = { method: 's-gMethod', poUser: 's-poUser', poToken: 's-poToken', ntfyTopic: 's-ntfyTopic', hubPort: 's-hubPort', style: 's-gStyle', split: 's-gSplit', gap: 's-gGap', repeat: 's-gRepeat', maxChars: 's-gMax', titleMax: 's-gTitleMax' };
 function fillSettings() {
   for (const [k, id] of Object.entries(SET_MAP)) $('#' + id).value = S[k];
   for (const [k, id] of Object.entries(GLASS_MAP)) $('#' + id).value = S.glasses[k];

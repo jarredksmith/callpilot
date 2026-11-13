@@ -235,6 +235,7 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <option value="app">This app (needs Home Screen install)</option>
         <option value="pushover">Pushover app</option>
         <option value="ntfy">ntfy app</option>
+        <option value="hub">Glasses Hub app (iPhone app only)</option>
       </select>
       <div id="g-app" class="gopt">
         <div class="row" style="margin-top:10px"><button class="btn small" id="enableNotif">Allow notifications</button><button class="btn small native-only" id="notifSettings" hidden>iPhone notification settings</button></div>
@@ -266,6 +267,11 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px;padding:4px 0}
         <label for="s-ntfyTopic">ntfy channel name (keep it secret)</label>
         <div class="row"><input id="s-ntfyTopic" type="text" autocomplete="off" style="flex:1"><button class="btn small" id="ntfyNew" style="flex:none">New</button></div>
         <div class="hint">Subscribe to this exact name in the ntfy app. Anyone who knows the name can read it.</div>
+      </div>
+      <div id="g-hub" class="gopt">
+        <label for="s-hubPort">Glasses Hub port</label>
+        <input id="s-hubPort" type="number" inputmode="numeric" min="1024" max="65535" placeholder="8765">
+        <div class="hint">Notes show inside Glasses Hub's own display on your RayNeo glasses, instead of arriving as notifications (which the glasses won't show while Glasses Hub's page is up). In Glasses Hub: start the display, then turn on Local API under Apps &gt; Live text. Each note is sent whole, so the notification length settings below don't apply.</div>
       </div>
       <div id="g-common" class="gopt">
         <label for="s-gStyle">What to send</label>
